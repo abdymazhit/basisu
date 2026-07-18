@@ -1,0 +1,11 @@
+# Dev orchestration: `cargo xtask <cmd>`.
+#   verify  : run the conformance suite (byte-equality) + bench-vs-baseline.
+#   coverage: print the conformance-matrix coverage report.
+#   corpus  : fetch the full conformance corpus.
+[package]
+name = "xtask"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[dependencies]

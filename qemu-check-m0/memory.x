@@ -1,0 +1,6 @@
+/* BBC micro:bit (nRF51822, Cortex-M0): 256K flash, 16K RAM. */
+MEMORY
+{
+  FLASH : ORIGIN = 0x00000000, LENGTH = 256K
+  RAM   : ORIGIN = 0x20000000, LENGTH = 16K
+}

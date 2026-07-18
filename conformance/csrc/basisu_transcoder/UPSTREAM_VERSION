@@ -1,0 +1,25 @@
+# Vendored Basis Universal transcoder. Pinned upstream version.
+#
+# The basisu crate is proven byte-for-byte identical to this exact snapshot.
+# Bump deliberately to a tagged release: run `cargo xtask vendor <git-ref>`, then
+# `cargo xtask verify`. The conformance suite localizes any output change to the
+# specific (format, file) rows that diverged.
+
+upstream    = "BinomialLLC/basis_universal"
+component   = "transcoder/ (transcoder-only subset; no encoder, CLI, or zstd)"
+version     = "v2_1_0"        # tagged release; adds the UASTC HDR codec + HDR targets
+obtained_via = "cargo xtask vendor v2_1_0 (verbatim upstream transcoder/ file set)"
+license     = "Apache-2.0"
+
+# Build contract that defines parity (mirrored in conformance/build.rs):
+#   -std=c++17  -ffp-contract=off          (v2 needs C++17: constexpr-if, std::size)
+#   BASISD_SUPPORT_KTX2=1
+#   BASISD_SUPPORT_KTX2_ZSTD=1 when a system zstd is found, else 0 (zstd files
+#   are then gated against the committed goldens instead of the oracle)
+# The transcoder source files are unmodified byte-for-byte copies of upstream.
+#
+# NOTE: v2 added HDR targets (BC6H, ASTC_HDR_4x4/6x6, RGB/RGBA_HALF, RGB_9E5) and
+# new source codecs. The Rust port covers every source family this snapshot
+# accepts: ETC1S, UASTC LDR 4x4 (with video), UASTC HDR 4x4, raw ASTC LDR, raw
+# ASTC HDR 6x6, UASTC HDR 6x6, and XUASTC LDR. All 500 (source, target)
+# combinations in the conformance matrix are verified byte-identical.

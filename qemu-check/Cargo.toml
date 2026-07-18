@@ -1,0 +1,23 @@
+# Bare-metal (Cortex-M3) harness that transcodes a fixture under QEMU to prove
+# the crate runs on real no_std hardware, not just that it compiles. Its own
+# workspace so the main basisu workspace never tries to build it for the host.
+[package]
+name = "qemu-check"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+basisu = { path = "../basisu", default-features = false, features = ["libm"] }
+cortex-m-rt = "0.7"
+# Provides the single-core critical-section impl embedded-alloc needs.
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-semihosting = "0.5"
+panic-semihosting = { version = "0.6", features = ["exit"] }
+embedded-alloc = "0.5"
+
+[profile.release]
+opt-level = "s"
+lto = true

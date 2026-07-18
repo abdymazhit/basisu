@@ -1,0 +1,16 @@
+# basisu: a complete, bit-exact pure-Rust Basis Universal transcoder.
+#
+# Workspace members:
+#   basisu: the deliverable crate (pure Rust, no required deps).
+#   conformance     : dev-only: the vendored C++ compiled as a golden oracle
+#                      + the declarative byte-equality conformance harness.
+#   xtask           : dev-only: `verify` (conformance + bench-vs-baseline),
+#                      corpus fetch, coverage report.
+[workspace]
+members = ["basisu", "conformance", "xtask"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/marcogomez/basisu"

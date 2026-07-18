@@ -1,0 +1,12 @@
+/target
+# Python bytecode from the tools/ codegen scripts.
+__pycache__/
+*.pyc
+# The full conformance/bench corpus is fetched, not committed (only corpus/smoke
+# is committed). See corpus/fetch.sh.
+/corpus/cts
+/corpus/gltf
+/corpus/binomial
+/corpus/*.tmp
+# In-progress fetch.sh clones (removed on exit; stale only after a hard kill).
+/corpus/.fetch*

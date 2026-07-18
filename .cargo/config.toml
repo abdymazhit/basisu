@@ -1,0 +1,7 @@
+# `cargo xtask <cmd>` shorthand for the dev-orchestration crate.
+[alias]
+xtask = "run --quiet -p xtask --"
+
+# Run wasm32 tests (tests/wasm.rs) in Node via the wasm-bindgen test runner.
+[target.wasm32-unknown-unknown]
+runner = "wasm-bindgen-test-runner"

@@ -1,0 +1,25 @@
+# Dev-only: the vendored C++ Basis Universal transcoder compiled as a golden
+# oracle, plus the declarative byte-equality conformance harness. Not published;
+# it exists only to prove the Rust crate decodes byte-for-byte identically to
+# the C++ transcoder it drives as an oracle.
+[package]
+name = "conformance"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[lib]
+name = "conformance"
+path = "src/lib.rs"
+
+[build-dependencies]
+cc = "1"
+
+[dependencies]
+basisu = { path = "../basisu" }
+sha2 = "0.10"
+
+# The golden-baker: regenerates goldens/manifest.tsv from the C++ oracle.
+[[bin]]
+name = "bake-goldens"
+path = "src/bin/bake_goldens.rs"
