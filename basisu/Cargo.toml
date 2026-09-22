@@ -21,7 +21,22 @@ name = "basisu"
 path = "src/lib.rs"
 
 [features]
-default = ["std", "zstd"]
+default = [
+    "std",
+    "zstd",
+    "astc-ldr",
+    "xuastc",
+    "hdr",
+    "bc",
+    "etc",
+    "eac",
+    "astc",
+    "pvrtc1",
+    "pvrtc2",
+    "atc",
+    "fxt1",
+    "packed",
+]
 # Disabling `std` makes the crate `#![no_std]` (it still requires `alloc`).
 std = []
 # `ss=2` (Zstandard-supercompressed) KTX2 levels. Pure-Rust inflate; drop it for
@@ -31,9 +46,29 @@ zstd = ["dep:ruzstd", "std"]
 # Float sqrt/round for no_std builds (in std, not core). Enable for `no_std`:
 # `--no-default-features --features libm`.
 libm = ["dep:libm"]
-# The crate does not split target-format families (bc / astc / etc / pvrtc /
-# ...) behind separate features; every convert module and dispatch arm is
-# always compiled in.
+# Codec features. ETC1S and UASTC LDR sources and the RGBA32 target are always
+# compiled; everything else is a feature so a consumer that transcodes to a
+# known target set can leave the other codecs (and their lookup tables, tens
+# of kilobytes each) out of its binary. A (source, target) pair whose feature
+# is off reports false from `is_format_supported` / `Transcoder::supports` and
+# fails a transcode with `Error::Unsupported`. Only the dispatch arms are
+# gated; the codec modules themselves stay compiled and unreachable code is
+# dropped by the final link.
+#
+# Sources beyond ETC1S / UASTC LDR:
+astc-ldr = []
+xuastc = ["astc-ldr"]
+hdr = []
+# Target families:
+bc = []
+etc = []
+eac = []
+astc = []
+pvrtc1 = []
+pvrtc2 = []
+atc = []
+fxt1 = []
+packed = []
 
 [dependencies]
 ruzstd = { version = "0.7", optional = true, default-features = false }

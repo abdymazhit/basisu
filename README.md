@@ -153,6 +153,31 @@ The crate also builds `#![no_std]` (with `alloc`) for embedded use: disable
 `std` and enable the `libm` feature. That is a niche path most consumers can
 ignore.
 
+### Codec features
+
+Every codec beyond the ETC1S and UASTC LDR sources and the RGBA32 target is a
+feature, all on by default. A consumer that transcodes to a known target set
+can leave the rest out of its binary: the ETC1S conversion tables alone are
+tens of kilobytes per target family, which matters for a WebAssembly build.
+
+- Sources: `astc-ldr` (raw ASTC LDR), `xuastc` (XUASTC LDR; implies
+  `astc-ldr`), `hdr` (UASTC HDR 4x4, ASTC HDR 6x6, UASTC HDR 6x6 and the HDR
+  targets).
+- Target families: `bc` (BC1/3/4/5/7), `etc` (ETC1, ETC2 RGBA), `eac`
+  (EAC R11/RG11), `astc` (ASTC 4x4), `pvrtc1`, `pvrtc2`, `atc`, `fxt1`,
+  `packed` (RGB565, BGR565, RGBA4444).
+
+A pair whose feature is off reports `false` from `is_format_supported` /
+`Transcoder::supports` and fails a transcode with `Error::Unsupported`. For
+example, a glTF loader that targets ASTC, ETC2 and BC from ETC1S/UASTC files:
+
+```toml
+basisu = { version = "0.1", default-features = false, features = ["std", "zstd", "astc", "etc", "bc"] }
+```
+
+The test-suite runs under any feature set: the golden test checks every
+manifest row the build compiles and asserts the rest are refused.
+
 ## Relationship to the upstream project
 
 This is a Rust port of the Basis Universal C++ transcoder, tracking upstream

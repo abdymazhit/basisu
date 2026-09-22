@@ -13,6 +13,7 @@
 pub mod decode;
 pub mod dequant;
 pub mod half;
+#[cfg(feature = "hdr")]
 pub(crate) mod hdr6x6;
 pub mod pack;
 pub mod rgb9e5;

@@ -29,6 +29,7 @@ fn rust_matches_committed_goldens() {
         .expect("read goldens/manifest.tsv (run `cargo xtask bake-goldens`)");
 
     let mut checked = 0usize;
+    let mut skipped = 0usize;
     let mut cache: Option<(String, Vec<u8>)> = None;
 
     for line in manifest
@@ -56,6 +57,19 @@ fn rust_matches_committed_goldens() {
 
         let tex = Transcoder::new(data).expect("open asset");
         let fmt = TargetFormat::from_i32(target).expect("known target");
+        // A build without the row's codec feature refuses the pair; the rows it
+        // does compile must still be byte-perfect.
+        if !tex.supports(fmt) {
+            assert!(
+                matches!(
+                    tex.transcode(level, fmt, DecodeFlags::from_bits(flags)),
+                    Err(basisu::Error::Unsupported { .. })
+                ),
+                "{asset} {fmt:?}: an unsupported pair must be refused, not decoded"
+            );
+            skipped += 1;
+            continue;
+        }
         let got = tex
             .transcode(level, fmt, DecodeFlags::from_bits(flags))
             .unwrap_or_else(|e| panic!("rust transcode {asset} {fmt:?} L{level}: {e:?}"));
@@ -69,5 +83,25 @@ fn rust_matches_committed_goldens() {
         checked += 1;
     }
     assert!(checked > 0, "no golden rows checked");
-    eprintln!("goldens: {checked} rows byte-perfect (pure Rust, no C++)");
+    let every_codec = cfg!(all(
+        feature = "astc-ldr",
+        feature = "xuastc",
+        feature = "hdr",
+        feature = "bc",
+        feature = "etc",
+        feature = "eac",
+        feature = "astc",
+        feature = "pvrtc1",
+        feature = "pvrtc2",
+        feature = "atc",
+        feature = "fxt1",
+        feature = "packed",
+    ));
+    assert!(
+        !every_codec || skipped == 0,
+        "a build with every codec feature must check every row ({skipped} skipped)"
+    );
+    eprintln!(
+        "goldens: {checked} rows byte-perfect (pure Rust, no C++), {skipped} skipped by features"
+    );
 }

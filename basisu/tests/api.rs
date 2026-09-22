@@ -70,6 +70,7 @@ fn transcode_len_matches_output_size_for_every_supported_target() {
 /// The caller-buffer path (`transcode_into`) produces the same bytes as the
 /// allocating path.
 #[test]
+#[cfg(feature = "bc")]
 fn transcode_into_matches_transcode() {
     let t = Transcoder::new(UASTC).unwrap();
     let target = TargetFormat::Bc7Rgba;
@@ -97,6 +98,9 @@ fn transcode_into_dirty_buffer_matches_and_leaves_tail() {
     ];
     for (data, target) in cases {
         let t = Transcoder::new(data).unwrap();
+        if !t.supports(target) {
+            continue;
+        }
         let owned = t.transcode(0, target, DecodeFlags::NONE).unwrap();
         let needed = t.output_size(0, target).unwrap();
         assert_eq!(owned.len(), needed, "{target:?}");
@@ -112,9 +116,40 @@ fn transcode_into_dirty_buffer_matches_and_leaves_tail() {
     }
 }
 
+/// A codec family left out of the build (its Cargo feature off) is reported
+/// unsupported and refused with `Error::Unsupported`; it is never decoded
+/// through another family's path. RGBA32 is always compiled.
+#[test]
+fn a_codec_family_left_out_of_the_build_is_refused() {
+    let t = Transcoder::new(ETC1S).unwrap();
+    let families = [
+        (TargetFormat::AtcRgb, cfg!(feature = "atc")),
+        (TargetFormat::Pvrtc2_4Rgb, cfg!(feature = "pvrtc2")),
+        (TargetFormat::Pvrtc1_4Rgb, cfg!(feature = "pvrtc1")),
+        (TargetFormat::Fxt1Rgb, cfg!(feature = "fxt1")),
+        (TargetFormat::EacR11, cfg!(feature = "eac")),
+        (TargetFormat::Rgb565, cfg!(feature = "packed")),
+        (TargetFormat::Bc7Rgba, cfg!(feature = "bc")),
+        (TargetFormat::Etc2Rgba, cfg!(feature = "etc")),
+        (TargetFormat::Astc4x4Rgba, cfg!(feature = "astc")),
+        (TargetFormat::Rgba32, true),
+    ];
+    for (target, compiled) in families {
+        assert_eq!(t.supports(target), compiled, "{target:?}");
+        // A compiled pair may still fail on the fixture itself (PVRTC1 wants
+        // power-of-two dimensions); what it must not do is refuse the pair.
+        let refused = matches!(
+            t.transcode(0, target, DecodeFlags::NONE),
+            Err(Error::Unsupported { .. })
+        );
+        assert_eq!(refused, !compiled, "{target:?}");
+    }
+}
+
 /// An undersized output buffer fails with `OutputTooSmall` carrying the exact
 /// size required.
 #[test]
+#[cfg(feature = "bc")]
 fn output_too_small_reports_needed() {
     let t = Transcoder::new(UASTC).unwrap();
     let target = TargetFormat::Bc7Rgba;
@@ -271,6 +306,7 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 /// values were produced by this transcoder after the conformance suite proved
 /// the whole sequence byte-identical to the reference C++ transcoder.
 #[test]
+#[cfg(feature = "etc")]
 fn video_frames_transcode_in_order() {
     let t = Transcoder::new(BASIS_VIDEO).unwrap();
     assert!(t.is_video());

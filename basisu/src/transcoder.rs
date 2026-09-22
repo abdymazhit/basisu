@@ -44,6 +44,8 @@ pub struct Ktx2Transcoder<'a> {
     /// UASTC HDR 6x6 intermediate per-image `(byte offset, byte length)`
     /// slice descriptors, relative to their level's byte offset (empty for
     /// every other format).
+    // Read by the XUASTC and UASTC HDR 6x6 paths only.
+    #[cfg_attr(not(any(feature = "xuastc", feature = "hdr")), allow(dead_code))]
     slice_descs: Vec<(u32, u32)>,
     /// True for ETC1S video: a `KTXanimData` key, or any image desc carrying
     /// `KTX2_IMAGE_IS_P_FRAME` on a non-cubemap layer array.
@@ -340,6 +342,7 @@ impl<'a> Ktx2Transcoder<'a> {
             // The XUASTC stream's slice comes from the SGD descs like the 6x6
             // intermediate; the transcode layer validates the stream header
             // against the level's block counts.
+            #[cfg(feature = "xuastc")]
             BasisFormat::XuastcLdr(b) => {
                 let face_count = self.header.face_count.max(1);
                 let image_index = (level * self.header.layer_count.max(1) * face_count
@@ -354,8 +357,11 @@ impl<'a> Ktx2Transcoder<'a> {
                     stream, b, bx, by, lw, lh, fmt, flags, out,
                 )
             }
+            #[cfg(not(feature = "xuastc"))]
+            BasisFormat::XuastcLdr(_) => None,
             // The intermediate stream decompresses to raw ASTC HDR 6x6 blocks
             // first; the per-target paths are then the raw 6x6 ones.
+            #[cfg(feature = "hdr")]
             BasisFormat::UastcHdr6x6 => {
                 let face_count = self.header.face_count.max(1);
                 let image_index = (level * self.header.layer_count.max(1) * face_count
@@ -374,6 +380,8 @@ impl<'a> Ktx2Transcoder<'a> {
                 }
                 dispatch::transcode_astc_hdr_6x6(&blocks, bx, by, lw, lh, fmt, flags, out)
             }
+            #[cfg(not(feature = "hdr"))]
+            BasisFormat::UastcHdr6x6 => None,
         }
     }
 
@@ -431,9 +439,19 @@ impl<'a> Ktx2Transcoder<'a> {
         let img = level_data.get(img_ofs..img_ofs + total_2d)?;
 
         match self.header.format {
+            #[cfg(feature = "hdr")]
             BasisFormat::UastcHdr4x4 => {
                 dispatch::transcode_uastc_hdr(img, bx, by, lw, lh, fmt, out)
             }
+            #[cfg(feature = "hdr")]
+            BasisFormat::AstcHdr6x6 => {
+                dispatch::transcode_astc_hdr_6x6(img, bx, by, lw, lh, fmt, flags, out)
+            }
+            #[cfg(not(feature = "hdr"))]
+            BasisFormat::UastcHdr4x4 | BasisFormat::AstcHdr6x6 => None,
+            #[cfg(not(feature = "astc-ldr"))]
+            BasisFormat::AstcLdr(_) => None,
+            #[cfg(feature = "astc-ldr")]
             BasisFormat::AstcLdr(b) => dispatch::transcode_astc_ldr(
                 img,
                 b,
@@ -447,9 +465,6 @@ impl<'a> Ktx2Transcoder<'a> {
                 self.header.has_alpha,
                 out,
             ),
-            BasisFormat::AstcHdr6x6 => {
-                dispatch::transcode_astc_hdr_6x6(img, bx, by, lw, lh, fmt, flags, out)
-            }
             _ => dispatch::transcode_uastc(
                 img,
                 self.header.has_alpha,

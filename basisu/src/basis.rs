@@ -125,6 +125,8 @@ pub struct BasisTranscoder<'a> {
     is_video: bool,
     /// `cBASISHeaderFlagSRGB`: raw ASTC LDR slices decode with the sRGB
     /// profile on the re-encode targets.
+    // Read by the raw-ASTC LDR path only.
+    #[cfg_attr(not(feature = "astc-ldr"), allow(dead_code))]
     astc_is_srgb: bool,
     /// Base (image 0, level 0) pixel dimensions.
     base_width: u32,
@@ -537,12 +539,14 @@ impl<'a> BasisTranscoder<'a> {
                 dispatch::transcode_uastc(img, self.has_alpha, bx, by, lw, lh, fmt, flags, out)
             }
             // Same raw-slice framing as UASTC LDR, HDR per-target dispatch.
+            #[cfg(feature = "hdr")]
             BasisSourceFormat::UastcHdr4x4 => {
                 let img = self.uastc_slice(image, level)?;
                 dispatch::transcode_uastc_hdr(img, bx, by, lw, lh, fmt, out)
             }
             // Same raw-slice framing again; the slice's recorded block counts
             // are in the source's own footprint.
+            #[cfg(feature = "astc-ldr")]
             BasisSourceFormat::AstcLdr(b) => {
                 let img = self.uastc_slice(image, level)?;
                 dispatch::transcode_astc_ldr(
@@ -560,6 +564,7 @@ impl<'a> BasisTranscoder<'a> {
                 )
             }
             // Raw 6x6 HDR blocks, same slice framing, HDR per-target dispatch.
+            #[cfg(feature = "hdr")]
             BasisSourceFormat::AstcHdr6x6 => {
                 let img = self.uastc_slice(image, level)?;
                 dispatch::transcode_astc_hdr_6x6(img, bx, by, lw, lh, fmt, flags, out)
@@ -567,6 +572,7 @@ impl<'a> BasisTranscoder<'a> {
             // The slice is one intermediate stream; decompress it to raw ASTC
             // HDR 6x6 blocks, then the raw 6x6 paths take over. The decoded
             // dimensions must match the slice's recorded dimensions.
+            #[cfg(feature = "hdr")]
             BasisSourceFormat::UastcHdr6x6 => {
                 let stream = self.uastc_slice(image, level)?;
                 let (blocks, dec_w, dec_h) = crate::uastc_hdr_6x6::decode_6x6_hdr(stream)?;
@@ -577,12 +583,21 @@ impl<'a> BasisTranscoder<'a> {
             }
             // The slice is one XUASTC stream; the transcode layer validates
             // the stream header against the slice's block counts.
+            #[cfg(feature = "xuastc")]
             BasisSourceFormat::XuastcLdr(b) => {
                 let stream = self.uastc_slice(image, level)?;
                 crate::xuastc::transcode::transcode_xuastc(
                     stream, b, bx, by, lw, lh, fmt, flags, out,
                 )
             }
+            #[cfg(not(feature = "hdr"))]
+            BasisSourceFormat::UastcHdr4x4
+            | BasisSourceFormat::AstcHdr6x6
+            | BasisSourceFormat::UastcHdr6x6 => None,
+            #[cfg(not(feature = "astc-ldr"))]
+            BasisSourceFormat::AstcLdr(_) => None,
+            #[cfg(not(feature = "xuastc"))]
+            BasisSourceFormat::XuastcLdr(_) => None,
         }
     }
 }
