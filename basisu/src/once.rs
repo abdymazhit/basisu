@@ -37,6 +37,18 @@ impl<T> OnceBox<T> {
         }
     }
 
+    /// The stored value, if a call to [`get_or_init`](Self::get_or_init)
+    /// already built it; `None` leaves the cell untouched.
+    pub fn get(&self) -> Option<&T> {
+        let p = self.ptr.load(Ordering::Acquire);
+        if p.is_null() {
+            return None;
+        }
+        // SAFETY: a non-null pointer was stored by `get_or_init` from a leaked
+        // `Box<T>` that lives as long as the cell.
+        Some(unsafe { &*p })
+    }
+
     /// The stored value, building it with `init` on the first call. If two
     /// threads race the first call, one stores its box and the other drops its
     /// own; both then read the stored value.

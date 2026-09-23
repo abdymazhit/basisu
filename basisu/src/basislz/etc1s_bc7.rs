@@ -8,8 +8,8 @@ use super::bc7_chroma::{chroma_filter_bc7_mode5, new_endpoint_grid, record_endpo
 use super::etc1s::{Endpoint, Etc1sTranscoder, Selector};
 use crate::etc::block::DecoderEtcBlock;
 use crate::tables::bc7_m5_alpha::G_ETC1_G_TO_BC7_M5A;
-use crate::tables::bc7_m5_color::G_ETC1_TO_BC7_M5_COLOR;
 use crate::tables::bc7_m5_equals_1::G_BC7_M5_EQUALS_1;
+use crate::tables::lazy;
 use crate::uastc::bc7::set_block_bits;
 use alloc::vec::Vec;
 
@@ -156,6 +156,7 @@ fn build_bc7_m5(
 
 /// Convert an ETC1S color block to an opaque BC7 mode-5 block.
 pub fn convert_etc1s_to_bc7_m5_color(ep: &Endpoint, sel: &Selector) -> [u8; 16] {
+    let etc1_to_bc7_m5_color = lazy::bc7_m5_color();
     let low_selector = sel.lo_selector as usize;
     let high_selector = sel.hi_selector as u32;
     let inten_table = ep.inten5 as u32;
@@ -238,9 +239,9 @@ pub fn convert_etc1s_to_bc7_m5_color(ep: &Endpoint, sel: &Selector) -> [u8; 16] 
     let mut best_err = u32::MAX;
     let mut best_mapping = 0usize;
     for m in 0..NUM_MAPPINGS {
-        let total = G_ETC1_TO_BC7_M5_COLOR[base_r + m].m_err as u32
-            + G_ETC1_TO_BC7_M5_COLOR[base_g + m].m_err as u32
-            + G_ETC1_TO_BC7_M5_COLOR[base_b + m].m_err as u32;
+        let total = etc1_to_bc7_m5_color[base_r + m].m_err as u32
+            + etc1_to_bc7_m5_color[base_g + m].m_err as u32
+            + etc1_to_bc7_m5_color[base_b + m].m_err as u32;
         if total < best_err {
             best_err = total;
             best_mapping = m;
@@ -249,9 +250,9 @@ pub fn convert_etc1s_to_bc7_m5_color(ep: &Endpoint, sel: &Selector) -> [u8; 16] 
 
     let xlat = &SELECTOR_MAPPINGS[best_mapping];
     let (tr, tg, tb) = (
-        G_ETC1_TO_BC7_M5_COLOR[base_r + best_mapping],
-        G_ETC1_TO_BC7_M5_COLOR[base_g + best_mapping],
-        G_ETC1_TO_BC7_M5_COLOR[base_b + best_mapping],
+        etc1_to_bc7_m5_color[base_r + best_mapping],
+        etc1_to_bc7_m5_color[base_g + best_mapping],
+        etc1_to_bc7_m5_color[base_b + best_mapping],
     );
 
     let mut s_inv = 0u32;

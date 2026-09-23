@@ -33,6 +33,12 @@ pub use api::{
     TargetFormat, Transcoder, VideoState,
 };
 pub use support::is_format_supported;
+#[cfg(feature = "embedded-tables")]
+pub use tables::lazy::embedded_bundle as embedded_table_bundle;
+pub use tables::lazy::{
+    bundle_family, decode_bundle, install as install_tables, installed as tables_installed,
+    Solutions, TableFamily, TablesError,
+};
 
 // The codec modules below back the stable `Transcoder` API. They are `pub` (but
 // `#[doc(hidden)]`) so the conformance harness can drive individual codecs; they

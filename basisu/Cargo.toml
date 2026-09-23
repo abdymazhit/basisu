@@ -26,6 +26,7 @@ path = "src/lib.rs"
 default = [
     "std",
     "zstd",
+    "embedded-tables",
     "astc-ldr",
     "xuastc",
     "hdr",
@@ -57,6 +58,11 @@ libm = ["dep:libm"]
 # gated; the codec modules themselves stay compiled and unreachable code is
 # dropped by the final link.
 #
+# The five 61 440-byte ETC1S single-color solution tables behind the ASTC and BC
+# targets compiled into the binary. Off, a consumer supplies them at runtime with
+# `install_tables` (a wasm build downloads only the family its GPU needs); until
+# then those targets report unsupported from `Transcoder::supports`.
+embedded-tables = []
 # Sources beyond ETC1S / UASTC LDR:
 astc-ldr = []
 xuastc = ["astc-ldr"]

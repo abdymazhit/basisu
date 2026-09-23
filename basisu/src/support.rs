@@ -85,6 +85,11 @@ pub fn is_format_supported(target: TargetFormat, source: SourceFormat) -> bool {
     if !source_compiled(source) || !target_compiled(target, source) {
         return false;
     }
+    // An ETC1S target whose solution tables are supplied at runtime is
+    // unsupported until they are installed (`tables::lazy`).
+    if !crate::tables::lazy::ready_for(target, source) {
+        return false;
+    }
     let hdr_target = matches!(
         target,
         Bc6h | AstcHdr4x4Rgba | AstcHdr6x6Rgba | RgbHalf | RgbaHalf | Rgb9e5

@@ -13,8 +13,7 @@ use super::astc_tables::{
 };
 use super::etc1s::{Endpoint, Etc1sTranscoder, Selector};
 use crate::etc::block::DecoderEtcBlock;
-use crate::tables::astc::G_ETC1_TO_ASTC;
-use crate::tables::astc_0_255::G_ETC1_TO_ASTC_0_255;
+use crate::tables::lazy;
 use crate::uastc::astc_pack::set_bits;
 use alloc::vec::Vec;
 
@@ -45,6 +44,7 @@ fn astc_void_extent(r: u32, g: u32, b: u32, a: u32) -> [u8; 16] {
 /// Cases, in priority order: void-extent (solid color), BTC (<= 2 unique
 /// selectors), grayscale luminance+alpha, and the CEM 8 8-bit-endpoint path.
 pub fn convert_etc1s_to_astc_4x4(ep: &Endpoint, sel: &Selector) -> [u8; 16] {
+    let etc1_to_astc_0_255 = lazy::astc_tables().1;
     let base_color = ep.color5;
     let inten_table = ep.inten5 as u32;
     let low_selector = sel.lo_selector as usize;
@@ -102,8 +102,8 @@ pub fn convert_etc1s_to_astc_4x4(ep: &Endpoint, sel: &Selector) -> [u8; 16] {
         let base_idx =
             (inten_table as usize * 32 + g) * (NUM_RANGES * NUM_MAPPINGS) + srt * NUM_MAPPINGS;
         let best = best_grayscale_mapping_0_255()[g][inten_table as usize][srt] as usize;
-        blk.endpoints[0] = G_ETC1_TO_ASTC_0_255[base_idx + best].m_lo;
-        blk.endpoints[1] = G_ETC1_TO_ASTC_0_255[base_idx + best].m_hi;
+        blk.endpoints[0] = etc1_to_astc_0_255[base_idx + best].m_lo;
+        blk.endpoints[1] = etc1_to_astc_0_255[base_idx + best].m_hi;
         let xlat = &SELECTOR_MAPPINGS[best];
         for y in 0..4u32 {
             for x in 0..4u32 {
@@ -127,9 +127,9 @@ pub fn convert_etc1s_to_astc_4x4(ep: &Endpoint, sel: &Selector) -> [u8; 16] {
     let mut best_err = u32::MAX;
     let mut best_mapping = 0usize;
     for m in 0..NUM_MAPPINGS {
-        let total = G_ETC1_TO_ASTC_0_255[base_r + m].m_err as u32
-            + G_ETC1_TO_ASTC_0_255[base_g + m].m_err as u32
-            + G_ETC1_TO_ASTC_0_255[base_b + m].m_err as u32;
+        let total = etc1_to_astc_0_255[base_r + m].m_err as u32
+            + etc1_to_astc_0_255[base_g + m].m_err as u32
+            + etc1_to_astc_0_255[base_b + m].m_err as u32;
         if total < best_err {
             best_err = total;
             best_mapping = m;
@@ -137,12 +137,12 @@ pub fn convert_etc1s_to_astc_4x4(ep: &Endpoint, sel: &Selector) -> [u8; 16] {
     }
 
     let mut blk = AstcBlockParams::default();
-    blk.endpoints[0] = G_ETC1_TO_ASTC_0_255[base_r + best_mapping].m_lo;
-    blk.endpoints[1] = G_ETC1_TO_ASTC_0_255[base_r + best_mapping].m_hi;
-    blk.endpoints[2] = G_ETC1_TO_ASTC_0_255[base_g + best_mapping].m_lo;
-    blk.endpoints[3] = G_ETC1_TO_ASTC_0_255[base_g + best_mapping].m_hi;
-    blk.endpoints[4] = G_ETC1_TO_ASTC_0_255[base_b + best_mapping].m_lo;
-    blk.endpoints[5] = G_ETC1_TO_ASTC_0_255[base_b + best_mapping].m_hi;
+    blk.endpoints[0] = etc1_to_astc_0_255[base_r + best_mapping].m_lo;
+    blk.endpoints[1] = etc1_to_astc_0_255[base_r + best_mapping].m_hi;
+    blk.endpoints[2] = etc1_to_astc_0_255[base_g + best_mapping].m_lo;
+    blk.endpoints[3] = etc1_to_astc_0_255[base_g + best_mapping].m_hi;
+    blk.endpoints[4] = etc1_to_astc_0_255[base_b + best_mapping].m_lo;
+    blk.endpoints[5] = etc1_to_astc_0_255[base_b + best_mapping].m_hi;
 
     let s0 = blk.endpoints[0] as i32 + blk.endpoints[2] as i32 + blk.endpoints[4] as i32;
     let s1 = blk.endpoints[1] as i32 + blk.endpoints[3] as i32 + blk.endpoints[5] as i32;
@@ -177,6 +177,7 @@ pub fn convert_etc1s_to_astc_4x4_rgba(
     aep: &Endpoint,
     asel: &Selector,
 ) -> [u8; 16] {
+    let (etc1_to_astc, etc1_to_astc_0_255) = lazy::astc_tables();
     let base_color = cep.color5;
     let inten_table = cep.inten5 as u32;
     let low_selector = csel.lo_selector as usize;
@@ -261,8 +262,8 @@ pub fn convert_etc1s_to_astc_4x4_rgba(
             let bi =
                 (alpha_inten as usize * 32 + ag) * (NUM_RANGES * NUM_MAPPINGS) + srt * NUM_MAPPINGS;
             let best = best_grayscale_mapping_0_255()[ag][alpha_inten as usize][srt] as usize;
-            blk.endpoints[2] = G_ETC1_TO_ASTC_0_255[bi + best].m_lo;
-            blk.endpoints[3] = G_ETC1_TO_ASTC_0_255[bi + best].m_hi;
+            blk.endpoints[2] = etc1_to_astc_0_255[bi + best].m_lo;
+            blk.endpoints[3] = etc1_to_astc_0_255[bi + best].m_hi;
             let xlat = &SELECTOR_MAPPINGS[best];
             for y in 0..4u32 {
                 for x in 0..4u32 {
@@ -286,8 +287,8 @@ pub fn convert_etc1s_to_astc_4x4_rgba(
             let bi =
                 (inten_table as usize * 32 + g) * (NUM_RANGES * NUM_MAPPINGS) + srt * NUM_MAPPINGS;
             let best = best_grayscale_mapping_0_255()[g][inten_table as usize][srt] as usize;
-            blk.endpoints[0] = G_ETC1_TO_ASTC_0_255[bi + best].m_lo;
-            blk.endpoints[1] = G_ETC1_TO_ASTC_0_255[bi + best].m_hi;
+            blk.endpoints[0] = etc1_to_astc_0_255[bi + best].m_lo;
+            blk.endpoints[1] = etc1_to_astc_0_255[bi + best].m_hi;
             let xlat = &SELECTOR_MAPPINGS[best];
             for y in 0..4u32 {
                 for x in 0..4u32 {
@@ -334,8 +335,8 @@ pub fn convert_etc1s_to_astc_4x4_rgba(
         let bi =
             (alpha_inten as usize * 32 + ag) * (NUM_RANGES * NUM_MAPPINGS) + srt * NUM_MAPPINGS;
         let best = best_grayscale_mapping_47()[ag][alpha_inten as usize][srt] as usize;
-        blk.endpoints[6] = G_ETC1_TO_ASTC[bi + best].m_lo;
-        blk.endpoints[7] = G_ETC1_TO_ASTC[bi + best].m_hi;
+        blk.endpoints[6] = etc1_to_astc[bi + best].m_lo;
+        blk.endpoints[7] = etc1_to_astc[bi + best].m_hi;
         let xlat = &SELECTOR_MAPPINGS[best];
         for y in 0..4u32 {
             for x in 0..4u32 {
@@ -420,20 +421,20 @@ pub fn convert_etc1s_to_astc_4x4_rgba(
         let mut best_err = u32::MAX;
         let mut best_mapping = 0usize;
         for m in 0..NUM_MAPPINGS {
-            let total = G_ETC1_TO_ASTC[base_r + m].m_err as u32
-                + G_ETC1_TO_ASTC[base_g + m].m_err as u32
-                + G_ETC1_TO_ASTC[base_b + m].m_err as u32;
+            let total = etc1_to_astc[base_r + m].m_err as u32
+                + etc1_to_astc[base_g + m].m_err as u32
+                + etc1_to_astc[base_b + m].m_err as u32;
             if total < best_err {
                 best_err = total;
                 best_mapping = m;
             }
         }
-        blk.endpoints[0] = G_ETC1_TO_ASTC[base_r + best_mapping].m_lo;
-        blk.endpoints[1] = G_ETC1_TO_ASTC[base_r + best_mapping].m_hi;
-        blk.endpoints[2] = G_ETC1_TO_ASTC[base_g + best_mapping].m_lo;
-        blk.endpoints[3] = G_ETC1_TO_ASTC[base_g + best_mapping].m_hi;
-        blk.endpoints[4] = G_ETC1_TO_ASTC[base_b + best_mapping].m_lo;
-        blk.endpoints[5] = G_ETC1_TO_ASTC[base_b + best_mapping].m_hi;
+        blk.endpoints[0] = etc1_to_astc[base_r + best_mapping].m_lo;
+        blk.endpoints[1] = etc1_to_astc[base_r + best_mapping].m_hi;
+        blk.endpoints[2] = etc1_to_astc[base_g + best_mapping].m_lo;
+        blk.endpoints[3] = etc1_to_astc[base_g + best_mapping].m_hi;
+        blk.endpoints[4] = etc1_to_astc[base_b + best_mapping].m_lo;
+        blk.endpoints[5] = etc1_to_astc[base_b + best_mapping].m_hi;
         let s0 = ise[blk.endpoints[0] as usize]
             + ise[blk.endpoints[2] as usize]
             + ise[blk.endpoints[4] as usize];
