@@ -5,13 +5,21 @@
 //! those are in hand the per-target conversion is identical, so it lives here.
 
 use crate::basislz::etc1s::Etc1sTranscoder;
+#[cfg(feature = "etc")]
 use crate::etc::uastc_to_etc1::transcode_uastc_to_etc1;
+#[cfg(feature = "etc")]
 use crate::etc::uastc_to_etc2::transcode_uastc_to_etc2_rgba;
+#[cfg(feature = "astc")]
 use crate::uastc::astc_pack::transcode_uastc_to_astc;
+#[cfg(feature = "bc")]
 use crate::uastc::bc1::transcode_uastc_to_bc1;
+#[cfg(feature = "bc")]
 use crate::uastc::bc3_bc5::{transcode_uastc_to_bc3, transcode_uastc_to_bc5};
+#[cfg(feature = "bc")]
 use crate::uastc::bc4::transcode_uastc_to_bc4;
+#[cfg(feature = "bc")]
 use crate::uastc::bc7::transcode_uastc_to_bc7;
+#[cfg(feature = "eac")]
 use crate::uastc::eac::{transcode_uastc_to_etc2_eac_r11, transcode_uastc_to_etc2_eac_rg11};
 use crate::uastc::unpack::unpack_uastc;
 
@@ -69,6 +77,8 @@ fn mul_8(v: u32, q: u32) -> u32 {
 /// the mip level index whose previous-frame slots this image uses. `None` for
 /// an unsupported target.
 #[allow(clippy::too_many_arguments)]
+// Only the BC arms read the decode flags.
+#[cfg_attr(not(feature = "bc"), allow(unused_variables))]
 pub fn transcode_etc1s(
     t: &Etc1sTranscoder,
     rgb: &[u8],
@@ -84,36 +94,44 @@ pub fn transcode_etc1s(
 ) -> Option<()> {
     let vid = video.map(|(state, level)| state.slots(level as usize, (bx * by) as usize));
     match fmt {
+        #[cfg(feature = "astc")]
         target::ASTC_4X4_RGBA => match alpha {
             Some(a) => t.transcode_image_astc_rgba(rgb, a, bx, by, vid, out),
             None => t.transcode_slice_astc(rgb, bx, by, vid.map(|(c, _)| c), out),
         },
+        #[cfg(feature = "bc")]
         target::BC1_RGB => {
             // opaque target: an alpha slice, if present, is ignored
             // (the alpha-to-opaque decode flag is not supported here)
             let forbid = (flags & decode_flags::BC1_FORBID_THREE_COLOR_BLOCKS) != 0;
             t.transcode_slice_bc1(rgb, bx, by, forbid, vid.map(|(c, _)| c), out)
         }
+        #[cfg(feature = "bc")]
         target::BC3_RGBA => match alpha {
             Some(a) => t.transcode_image_bc3_rgba(rgb, a, bx, by, vid, out),
             None => t.transcode_slice_bc3_opaque(rgb, bx, by, vid.map(|(c, _)| c), out),
         },
         // PVRTC1_4_RGBA is image-global with alpha; without an alpha slice it
         // falls back to the RGB path.
+        #[cfg(feature = "pvrtc1")]
         target::PVRTC1_4_RGBA => match alpha {
             Some(a) => t.transcode_slice_pvrtc1_4_rgba(rgb, a, bx, by, vid, out),
             None => t.transcode_slice_pvrtc1_4_rgb(rgb, bx, by, vid.map(|(c, _)| c), out),
         },
         // PVRTC1 is image-global: per-block bounding-box endpoints, then a
         // whole-image modulation pass. Opaque (alpha ignored).
+        #[cfg(feature = "pvrtc1")]
         target::PVRTC1_4_RGB => {
             t.transcode_slice_pvrtc1_4_rgb(rgb, bx, by, vid.map(|(c, _)| c), out)
         }
+        #[cfg(feature = "bc")]
         target::BC4_R => t.transcode_slice_bc4(rgb, bx, by, vid.map(|(c, _)| c), out),
+        #[cfg(feature = "bc")]
         target::BC5_RG => match alpha {
             Some(a) => t.transcode_image_bc5_rg(rgb, a, bx, by, vid, out),
             None => t.transcode_slice_bc5_opaque(rgb, bx, by, vid.map(|(c, _)| c), out),
         },
+        #[cfg(feature = "bc")]
         target::BC7_RGBA => {
             // cross-block BC7 mode-5 chroma filtering is on by default;
             // NO_ETC1S_CHROMA_FILTERING opts out.
@@ -123,21 +141,28 @@ pub fn transcode_etc1s(
                 None => t.transcode_slice_bc7(rgb, bx, by, chroma, vid.map(|(c, _)| c), out),
             }
         }
+        #[cfg(feature = "etc")]
         target::ETC2_RGBA => match alpha {
             Some(a) => t.transcode_image_etc2_rgba(rgb, a, bx, by, vid, out),
             None => t.transcode_slice_etc2_rgba_opaque(rgb, bx, by, vid.map(|(c, _)| c), out),
         },
+        #[cfg(feature = "eac")]
         target::EAC_R11 => t.transcode_slice_eac_r11(rgb, bx, by, vid.map(|(c, _)| c), out),
+        #[cfg(feature = "eac")]
         target::EAC_RG11 => match alpha {
             Some(a) => t.transcode_image_eac_rg11(rgb, a, bx, by, vid, out),
             None => t.transcode_slice_eac_rg11_opaque(rgb, bx, by, vid.map(|(c, _)| c), out),
         },
+        #[cfg(feature = "atc")]
         target::ATC_RGB => t.transcode_slice_atc(rgb, bx, by, vid.map(|(c, _)| c), out),
+        #[cfg(feature = "atc")]
         target::ATC_RGBA => match alpha {
             Some(a) => t.transcode_image_atc_rgba(rgb, a, bx, by, vid, out),
             None => t.transcode_slice_atc_rgba_opaque(rgb, bx, by, vid.map(|(c, _)| c), out),
         },
+        #[cfg(feature = "pvrtc2")]
         target::PVRTC2_4_RGB => t.transcode_slice_pvrtc2_rgb(rgb, bx, by, vid.map(|(c, _)| c), out),
+        #[cfg(feature = "pvrtc2")]
         target::PVRTC2_4_RGBA => match alpha {
             Some(a) => t.transcode_image_pvrtc2_rgba(rgb, a, bx, by, vid, out),
             None => t.transcode_slice_pvrtc2_rgba_opaque(rgb, bx, by, vid.map(|(c, _)| c), out),
@@ -146,16 +171,21 @@ pub fn transcode_etc1s(
             Some(a) => t.transcode_image_rgba32(rgb, a, bx, by, lw, lh, vid, out),
             None => t.transcode_slice_rgba32(rgb, bx, by, lw, lh, vid.map(|(c, _)| c), out),
         },
+        #[cfg(feature = "etc")]
         target::ETC1_RGB => t.transcode_slice_etc1(rgb, bx, by, vid.map(|(c, _)| c), out),
         // FXT1 has an 8x4 block (the only such target): output grid is
         // ceil(w/8)*ceil(h/4), two ETC1S 4x4 blocks per FXT1 block.
+        #[cfg(feature = "fxt1")]
         target::FXT1_RGB => t.transcode_slice_fxt1(rgb, bx, by, lw, lh, vid.map(|(c, _)| c), out),
+        #[cfg(feature = "packed")]
         target::RGB565 => {
             t.transcode_slice_565(rgb, bx, by, lw, lh, false, vid.map(|(c, _)| c), out)
         }
+        #[cfg(feature = "packed")]
         target::BGR565 => {
             t.transcode_slice_565(rgb, bx, by, lw, lh, true, vid.map(|(c, _)| c), out)
         }
+        #[cfg(feature = "packed")]
         target::RGBA4444 => match alpha {
             Some(a) => t.transcode_image_rgba4444(rgb, a, bx, by, lw, lh, vid, out),
             None => {
@@ -189,10 +219,10 @@ pub fn transcode_uastc(
     // PVRTC1 is image-global: it can't go through the per-block loop. Build the
     // whole image at once (per-block bounding-box endpoints, then a whole-image
     // modulation pass). `None` for non-pow2 dimensions.
-    if fmt == target::PVRTC1_4_RGB {
+    if cfg!(feature = "pvrtc1") && fmt == target::PVRTC1_4_RGB {
         return crate::pvrtc::transcode_uastc_pvrtc1_4_rgb(img, bx, by, out);
     }
-    if fmt == target::PVRTC1_4_RGBA {
+    if cfg!(feature = "pvrtc1") && fmt == target::PVRTC1_4_RGBA {
         // a source with no alpha channel is encoded as PVRTC1_4_RGB instead;
         // both variants produce the same block layout and output size
         if has_alpha {
@@ -203,7 +233,10 @@ pub fn transcode_uastc(
 
     // Raster (per-pixel) targets: unpack each block to 16 pixels and write them
     // into a width*height image, packing per the target's pixel layout.
-    if matches!(
+    if !cfg!(feature = "packed") && fmt != target::RGBA32 {
+        // the packed rasters share this loop; without their feature only
+        // RGBA32 may enter it
+    } else if matches!(
         fmt,
         target::RGBA32 | target::RGB565 | target::BGR565 | target::RGBA4444
     ) {
@@ -256,6 +289,7 @@ pub fn transcode_uastc(
         return Some(());
     }
 
+    #[cfg(feature = "bc")]
     if fmt == target::BC1_RGB {
         // BC1 is an 8-byte-per-block opaque target.
         let high_quality = (flags & decode_flags::HIGH_QUALITY) != 0;
@@ -270,6 +304,7 @@ pub fn transcode_uastc(
         }
         return Some(());
     }
+    #[cfg(feature = "bc")]
     if fmt == target::BC4_R {
         // BC4 is an 8-byte-per-block single-channel format.
         if out.len() != n * 8 {
@@ -284,6 +319,7 @@ pub fn transcode_uastc(
         return Some(());
     }
     // ETC1 is an 8-byte-per-block target; everything else here is 16.
+    #[cfg(feature = "etc")]
     if fmt == target::ETC1_RGB {
         if out.len() != n * 8 {
             return None;
@@ -297,6 +333,7 @@ pub fn transcode_uastc(
         return Some(());
     }
     // EAC R11 is an 8-byte-per-block single-channel format (chan0 = R).
+    #[cfg(feature = "eac")]
     if fmt == target::EAC_R11 {
         let high_quality = (flags & decode_flags::HIGH_QUALITY) != 0;
         if out.len() != n * 8 {
@@ -311,6 +348,12 @@ pub fn transcode_uastc(
         return Some(());
     }
 
+    transcode_uastc_16(img, n, fmt, flags, out)
+}
+
+/// The 16-byte-per-block UASTC targets. `None` for any other target.
+#[cfg(any(feature = "astc", feature = "bc", feature = "etc", feature = "eac"))]
+fn transcode_uastc_16(img: &[u8], n: usize, fmt: i32, flags: u32, out: &mut [u8]) -> Option<()> {
     let high_quality = (flags & decode_flags::HIGH_QUALITY) != 0;
     if out.len() != n * 16 {
         return None;
@@ -318,13 +361,19 @@ pub fn transcode_uastc(
     out.fill(0);
     for b in 0..n {
         let src: [u8; 16] = img[b * 16..b * 16 + 16].try_into().ok()?;
-        let block = match fmt {
+        let block: [u8; 16] = match fmt {
+            #[cfg(feature = "astc")]
             target::ASTC_4X4_RGBA => transcode_uastc_to_astc(&src)?,
+            #[cfg(feature = "bc")]
             target::BC7_RGBA => transcode_uastc_to_bc7(&src)?,
+            #[cfg(feature = "etc")]
             target::ETC2_RGBA => transcode_uastc_to_etc2_rgba(&src)?,
             // BC3 = BC4(alpha) + BC1(color); BC5 = BC4(R) + BC4(A).
+            #[cfg(feature = "bc")]
             target::BC3_RGBA => transcode_uastc_to_bc3(&src, high_quality)?,
+            #[cfg(feature = "bc")]
             target::BC5_RG => transcode_uastc_to_bc5(&src, high_quality, 0, 3)?,
+            #[cfg(feature = "eac")]
             target::EAC_RG11 => transcode_uastc_to_etc2_eac_rg11(&src, high_quality, 0, 3)?,
             _ => return None,
         };
@@ -333,12 +382,18 @@ pub fn transcode_uastc(
     Some(())
 }
 
+#[cfg(not(any(feature = "astc", feature = "bc", feature = "etc", feature = "eac")))]
+fn transcode_uastc_16(_: &[u8], _: usize, _: i32, _: u32, _: &mut [u8]) -> Option<()> {
+    None
+}
+
 /// Transcode one UASTC HDR 4x4 image to `fmt`, writing into `out`. `img` is
 /// the level's per-image raw block bytes (`bx*by*16`, each block a restricted
 /// ASTC HDR block) and `(lw, lh)` the level's pixel dimensions, which the
 /// uncompressed targets use as the output row pitch and row count. The HDR
 /// path takes no decode flags. `None` for an unsupported target (only HDR
 /// targets are valid here), a short input, or a block the ASTC decode rejects.
+#[cfg(feature = "hdr")]
 pub fn transcode_uastc_hdr(
     img: &[u8],
     bx: u32,
@@ -362,6 +417,7 @@ pub fn transcode_uastc_hdr(
 /// the destination's block size, so the image copies through unchanged
 /// (`bx * by * 16` bytes) into `out`. The payload is not validated; the
 /// target is what declares it ASTC.
+#[cfg(any(feature = "hdr", feature = "astc-ldr"))]
 fn astc_passthrough(img: &[u8], bx: u32, by: u32, out: &mut [u8]) -> Option<()> {
     let total = (bx * by) as usize * 16;
     let src = img.get(..total)?;
@@ -380,6 +436,7 @@ fn astc_passthrough(img: &[u8], bx: u32, by: u32, out: &mut [u8]) -> Option<()> 
 /// pass-through, the four uncompressed targets (with deblock filtering per
 /// the decode flags), and the compressed re-encode targets (`has_alpha` takes
 /// effect there, via the alpha-to-opaque flag).
+#[cfg(feature = "astc-ldr")]
 #[allow(clippy::too_many_arguments)]
 pub fn transcode_astc_ldr(
     img: &[u8],
@@ -428,6 +485,7 @@ pub fn transcode_astc_ldr(
 /// ASTC pass-through, BC6H (through the 12x12-tile re-encoder, where
 /// HIGH_QUALITY enables the encoder's 2-subset search), or the uncompressed
 /// half-float/9E5 rasters.
+#[cfg(feature = "hdr")]
 #[allow(clippy::too_many_arguments)]
 pub fn transcode_astc_hdr_6x6(
     img: &[u8],

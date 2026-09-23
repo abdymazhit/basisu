@@ -6,8 +6,7 @@
 //! BC7 emits.
 
 use crate::once::OnceBox;
-use crate::tables::astc::G_ETC1_TO_ASTC;
-use crate::tables::astc_0_255::G_ETC1_TO_ASTC_0_255;
+use crate::tables::lazy;
 use crate::tables::solution::Etc1ToSolution;
 use alloc::boxed::Box;
 
@@ -95,11 +94,11 @@ fn build_best_grayscale_mapping(
 
 /// Best-mapping table for the `[0, 47]` ASTC value range, from `G_ETC1_TO_ASTC`.
 pub fn build_best_grayscale_mapping_47() -> Box<[[[u8; NUM_SELECTOR_RANGES]; 8]; 32]> {
-    build_best_grayscale_mapping(&G_ETC1_TO_ASTC)
+    build_best_grayscale_mapping(lazy::astc_tables().0)
 }
 /// Best-mapping table for the full `[0, 255]` range, from `G_ETC1_TO_ASTC_0_255`.
 pub fn build_best_grayscale_mapping_0_255() -> Box<[[[u8; NUM_SELECTOR_RANGES]; 8]; 32]> {
-    build_best_grayscale_mapping(&G_ETC1_TO_ASTC_0_255)
+    build_best_grayscale_mapping(lazy::astc_tables().1)
 }
 
 /// For each of the 256 target grayscale values, the `{lo, hi}` ISE endpoint

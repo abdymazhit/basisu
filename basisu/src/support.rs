@@ -1,10 +1,57 @@
-//! The source-codec by target-format validity matrix. Every target codec is
-//! unconditionally available in this crate, so ETC1S can reach every LDR target
-//! and UASTC LDR lacks only a few niche ones. HDR targets are reachable only
-//! from an HDR source, and vice versa: the LDR sources carry no HDR data and
-//! the HDR sources have no LDR decode path.
+//! The source-codec by target-format validity matrix. With every codec feature
+//! on, ETC1S can reach every LDR target and UASTC LDR lacks only a few niche
+//! ones. HDR targets are reachable only from an HDR source, and vice versa: the
+//! LDR sources carry no HDR data and the HDR sources have no LDR decode path.
+//! A pair whose codec feature is off is unsupported, whatever the matrix says.
 
 use crate::api::{SourceFormat, TargetFormat};
+
+/// Whether this build compiled the decoder for `source` (ETC1S and UASTC LDR
+/// always are).
+fn source_compiled(source: SourceFormat) -> bool {
+    match source {
+        SourceFormat::Etc1s | SourceFormat::UastcLdr => true,
+        SourceFormat::UastcHdr4x4 | SourceFormat::AstcHdr6x6 | SourceFormat::UastcHdr6x6 => {
+            cfg!(feature = "hdr")
+        }
+        SourceFormat::AstcLdr(_) => cfg!(feature = "astc-ldr"),
+        SourceFormat::XuastcLdr(_) => cfg!(feature = "xuastc"),
+    }
+}
+
+/// Whether this build compiled the encoder for `target` (RGBA32 always is).
+/// The ASTC pass-throughs need no encoder: a raw ASTC source copies through
+/// to its own block size regardless of the `astc` feature.
+fn target_compiled(target: TargetFormat, source: SourceFormat) -> bool {
+    use TargetFormat::*;
+    let passthrough = match source {
+        SourceFormat::AstcLdr(b) | SourceFormat::XuastcLdr(b) => target == b.passthrough_target(),
+        _ => false,
+    };
+    if passthrough {
+        return true;
+    }
+    match target {
+        Rgba32 => true,
+        Etc1Rgb | Etc2Rgba => cfg!(feature = "etc"),
+        Bc1Rgb | Bc3Rgba | Bc4R | Bc5Rg | Bc7Rgba => cfg!(feature = "bc"),
+        EacR11 | EacRg11 => cfg!(feature = "eac"),
+        Astc4x4Rgba => cfg!(feature = "astc"),
+        Pvrtc1_4Rgb | Pvrtc1_4Rgba => cfg!(feature = "pvrtc1"),
+        Pvrtc2_4Rgb | Pvrtc2_4Rgba => cfg!(feature = "pvrtc2"),
+        AtcRgb | AtcRgba => cfg!(feature = "atc"),
+        Fxt1Rgb => cfg!(feature = "fxt1"),
+        Rgb565 | Bgr565 | Rgba4444 => cfg!(feature = "packed"),
+        Bc6h | AstcHdr4x4Rgba | RgbHalf | RgbaHalf | Rgb9e5 | AstcHdr6x6Rgba => {
+            cfg!(feature = "hdr")
+        }
+        AstcLdr5x4Rgba | AstcLdr5x5Rgba | AstcLdr6x5Rgba | AstcLdr6x6Rgba | AstcLdr8x5Rgba
+        | AstcLdr8x6Rgba | AstcLdr10x5Rgba | AstcLdr10x6Rgba | AstcLdr8x8Rgba | AstcLdr10x8Rgba
+        | AstcLdr10x10Rgba | AstcLdr12x10Rgba | AstcLdr12x12Rgba => {
+            cfg!(feature = "astc-ldr")
+        }
+    }
+}
 
 /// Whether `target` is one of the ASTC pass-through targets (any block size,
 /// LDR or HDR). `is_format_supported` uses this to single out the non-4x4 LDR
@@ -32,9 +79,17 @@ fn is_astc_target(target: TargetFormat) -> bool {
     )
 }
 
-/// Whether `target` can be transcoded from `source`.
+/// Whether `target` can be transcoded from `source` by this build.
 pub fn is_format_supported(target: TargetFormat, source: SourceFormat) -> bool {
     use TargetFormat::*;
+    if !source_compiled(source) || !target_compiled(target, source) {
+        return false;
+    }
+    // An ETC1S target whose solution tables are supplied at runtime is
+    // unsupported until they are installed (`tables::lazy`).
+    if !crate::tables::lazy::ready_for(target, source) {
+        return false;
+    }
     let hdr_target = matches!(
         target,
         Bc6h | AstcHdr4x4Rgba | AstcHdr6x6Rgba | RgbHalf | RgbaHalf | Rgb9e5

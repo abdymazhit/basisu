@@ -12,8 +12,7 @@ use super::etc1s::{Endpoint, Etc1sTranscoder, Selector};
 use crate::etc::block::DecoderEtcBlock;
 use crate::once::OnceBox;
 use crate::tables::bc1::tables as bc1_tables;
-use crate::tables::dxt1_5::G_ETC1_TO_DXT_5;
-use crate::tables::dxt1_6::G_ETC1_TO_DXT_6;
+use crate::tables::lazy;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
@@ -99,6 +98,7 @@ pub fn convert_etc1s_to_dxt1(
     sel: &Selector,
     use_threecolor_blocks: bool,
 ) -> [u8; 8] {
+    let (etc1_to_dxt_5, etc1_to_dxt_6) = lazy::dxt_tables();
     let low_selector = sel.lo_selector as usize;
     let high_selector = sel.hi_selector as usize;
     let inten_table = ep.inten5 as u32;
@@ -209,18 +209,18 @@ pub fn convert_etc1s_to_dxt1(
     let mut best_err = u32::MAX;
     let mut best_mapping = 0usize;
     for m in 0..NUM_MAPPINGS {
-        let total = G_ETC1_TO_DXT_5[base_r + m].m_err as u32
-            + G_ETC1_TO_DXT_6[base_g + m].m_err as u32
-            + G_ETC1_TO_DXT_5[base_b + m].m_err as u32;
+        let total = etc1_to_dxt_5[base_r + m].m_err as u32
+            + etc1_to_dxt_6[base_g + m].m_err as u32
+            + etc1_to_dxt_5[base_b + m].m_err as u32;
         if total < best_err {
             best_err = total;
             best_mapping = m;
         }
     }
 
-    let tr = G_ETC1_TO_DXT_5[base_r + best_mapping];
-    let tg = G_ETC1_TO_DXT_6[base_g + best_mapping];
-    let tb = G_ETC1_TO_DXT_5[base_b + best_mapping];
+    let tr = etc1_to_dxt_5[base_r + best_mapping];
+    let tg = etc1_to_dxt_6[base_g + best_mapping];
+    let tb = etc1_to_dxt_5[base_b + best_mapping];
 
     let mut l = pack_unscaled_color(tr.m_lo as u32, tg.m_lo as u32, tb.m_lo as u32);
     let mut h = pack_unscaled_color(tr.m_hi as u32, tg.m_hi as u32, tb.m_hi as u32);
