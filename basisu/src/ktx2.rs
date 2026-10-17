@@ -292,7 +292,10 @@ impl Ktx2Header {
         if dfd_byte_length != 44 && dfd_byte_length != 60 {
             return None;
         }
-        if dfd_byte_offset + 32 > data.len() {
+        if dfd_byte_offset
+            .checked_add(32)
+            .is_none_or(|end| end > data.len())
+        {
             return None;
         }
         let dfd_bits = rd32(data, dfd_byte_offset + 12);
@@ -424,12 +427,17 @@ fn has_kvd_key(data: &[u8], kvd_offset: u32, kvd_length: u32, key: &[u8]) -> boo
         return false;
     }
     let start = kvd_offset as usize;
-    let end = start + kvd_length as usize;
+    // Two u32 fields can overflow a 32-bit `usize` (wasm32).
+    let Some(end) = start.checked_add(kvd_length as usize) else {
+        return false;
+    };
     if end > data.len() {
         return false;
     }
     let mut p = start;
-    while end - p > 4 {
+    // The last entry's padding can step `p` up to 3 bytes past `end`: that
+    // ends the scan, like the reference transcoder's alignment check.
+    while end.saturating_sub(p) > 4 {
         let l = u32::from_le_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]]) as usize;
         p += 4;
         if l < 2 || end - p < l {
@@ -447,4 +455,38 @@ fn has_kvd_key(data: &[u8], kvd_offset: u32, kvd_length: u32, key: &[u8]) -> boo
         p += (4 - (p & 3)) & 3;
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_kvd_key;
+
+    /// The last entry's 4-byte padding can step past the end of the block: a
+    /// 7-byte block holding one 2-byte entry leaves `p` one byte beyond it.
+    /// The scan must stop there, not wrap the remaining length into a huge
+    /// one and read past the block.
+    #[test]
+    fn padding_past_the_block_end_stops_the_scan() {
+        let data = [2, 0, 0, 0, b'x', 0, 0];
+        assert!(!has_kvd_key(&data, 0, 7, b"KTXanimData"));
+    }
+
+    /// An entry whose padding stays inside the block is still followed by the
+    /// next one, so a key in a later entry is found.
+    #[test]
+    fn a_key_after_a_padded_entry_is_found() {
+        let mut data = vec![2, 0, 0, 0, b'x', 0, 0, 0];
+        data.extend_from_slice(&12u32.to_le_bytes());
+        data.extend_from_slice(b"KTXanimData\0");
+        assert!(has_kvd_key(&data, 0, data.len() as u32, b"KTXanimData"));
+    }
+
+    /// Offset and length beyond the data — or beyond `usize` on a 32-bit
+    /// target — mean no marker.
+    #[test]
+    fn an_out_of_range_block_has_no_key() {
+        let data = [0u8; 16];
+        assert!(!has_kvd_key(&data, u32::MAX, u32::MAX, b"KTXanimData"));
+        assert!(!has_kvd_key(&data, 8, 16, b"KTXanimData"));
+    }
 }
