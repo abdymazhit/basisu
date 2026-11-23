@@ -454,6 +454,51 @@ fn a_pvrtc1_grid_past_the_swizzle_table_is_refused() {
         .is_err());
 }
 
+/// The single level of `uastc_hdr_zstd.ktx2` is Zstandard-supercompressed:
+/// 644x874 texels, 161x219 blocks, so 564144 bytes inflated.
+const UASTC_HDR_ZSTD: &[u8] = include_bytes!("../../corpus/smoke/uastc_hdr_zstd.ktx2");
+/// Level 0's `uncompressedByteLength` (u64), the third field of the level
+/// index entry.
+const KTX2_LEVEL0_UNCOMPRESSED_LENGTH: usize = KTX2_LEVEL0_BYTE_OFFSET + 16;
+
+/// The zstd inflate allocated the level's `uncompressedByteLength` up front,
+/// a size straight from the file: `u64::MAX` asked for a buffer past
+/// `isize::MAX` (a capacity-overflow panic), and anything short of that a
+/// buffer as large as the field claimed. The field must now equal the
+/// level size the dimensions imply (KTX2 defines it as the size of the
+/// level's data), checked before the buffer is allocated.
+#[test]
+#[cfg(all(feature = "zstd", feature = "hdr"))]
+fn a_zstd_length_that_disagrees_with_the_dimensions_is_refused() {
+    let exact = read_u64(UASTC_HDR_ZSTD, KTX2_LEVEL0_UNCOMPRESSED_LENGTH);
+    assert_eq!(exact, 161 * 219 * 16);
+    let target = TargetFormat::RgbaHalf;
+    let t = Transcoder::new(UASTC_HDR_ZSTD).unwrap();
+    assert!(t.transcode(0, target, DecodeFlags::NONE).is_ok());
+
+    for ulen in [u64::MAX, 1 << 63, exact + 16, exact - 16, exact * 2, 1] {
+        let data = with_u64(UASTC_HDR_ZSTD, KTX2_LEVEL0_UNCOMPRESSED_LENGTH, ulen);
+        let t = Transcoder::new(&data).unwrap();
+        assert!(
+            t.transcode(0, target, DecodeFlags::NONE).is_err(),
+            "{ulen:#x}"
+        );
+    }
+
+    // The same through a mip chain: only the level whose length disagrees
+    // fails.
+    let mip = include_bytes!("../../corpus/smoke/astc_hdr_6x6_zstd.ktx2");
+    let data = with_u64(mip, KTX2_LEVEL0_UNCOMPRESSED_LENGTH, u64::MAX);
+    let t = Transcoder::new(&data).unwrap();
+    assert!(t.transcode(0, target, DecodeFlags::NONE).is_err());
+    for level in 1..t.level_count() {
+        assert!(
+            t.transcode(level, target, DecodeFlags::NONE).is_ok(),
+            "level {level}"
+        );
+    }
+}
+
 /// Both Basis Universal containers open through the same `Transcoder::new`,
 /// with codec, alpha, and dimension metadata intact.
 #[test]

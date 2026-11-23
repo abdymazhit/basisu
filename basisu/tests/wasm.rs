@@ -23,6 +23,8 @@ const BASIS: &[u8] = include_bytes!("fixtures/etc1s.basis");
 /// The kazmaps-gl fuzz crash texture: ETC1S KTX2 whose supercompression global
 /// data offset is `u64::MAX` (see `tests/api.rs`).
 const FUZZ_SGD_OFFSET_MAX: &[u8] = include_bytes!("fixtures/fuzz_etc1s_sgd_offset_max.ktx2");
+/// A UASTC HDR 4x4 KTX2 whose one level is Zstandard-supercompressed.
+const UASTC_HDR_ZSTD: &[u8] = include_bytes!("../../corpus/smoke/uastc_hdr_zstd.ktx2");
 
 /// The four targets the typical consumer selects from device capabilities.
 const TARGETS: [TargetFormat; 4] = [
@@ -183,4 +185,23 @@ fn an_output_size_past_usize_is_refused_under_wasm() {
     let data = dims(16384);
     let t = Transcoder::new(&data).unwrap();
     assert_eq!(t.output_size(0, TargetFormat::Rgba32), Ok(1 << 30));
+}
+
+/// A zstd level's `uncompressedByteLength` sized the inflate buffer as is:
+/// here a length just under 4 GiB fits `usize`, and the buffer it asked for
+/// cannot exist. It must equal the size the level's dimensions imply, so the
+/// level is refused before anything is allocated. The host runs this in
+/// `tests/api.rs`.
+#[wasm_bindgen_test]
+fn a_zstd_length_past_the_level_size_is_refused_under_wasm() {
+    let ulen = KTX2_LEVEL0_BYTE_OFFSET + 16;
+    let data = with_u64(UASTC_HDR_ZSTD, ulen, u64::from(u32::MAX) - 15);
+    let t = Transcoder::new(&data).unwrap();
+    assert!(t
+        .transcode(0, TargetFormat::RgbaHalf, DecodeFlags::NONE)
+        .is_err());
+    let t = Transcoder::new(UASTC_HDR_ZSTD).unwrap();
+    assert!(t
+        .transcode(0, TargetFormat::RgbaHalf, DecodeFlags::NONE)
+        .is_ok());
 }

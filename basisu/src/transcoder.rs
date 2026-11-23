@@ -53,9 +53,10 @@ pub struct Ktx2Transcoder<'a> {
 }
 
 /// Inflate a Zstandard-supercompressed KTX2 level to exactly `want` bytes
-/// (the level's `uncompressed_byte_length`). `None` if the stream is malformed
-/// or does not produce exactly `want` bytes; a size mismatch means a corrupt
-/// level. Decoding is pure Rust (`ruzstd`).
+/// (the level's size from its dimensions, which its `uncompressed_byte_length`
+/// must equal). `None` if the stream is malformed or does not produce exactly
+/// `want` bytes; a size mismatch means a corrupt level. Decoding is pure Rust
+/// (`ruzstd`).
 #[cfg(feature = "zstd")]
 fn zstd_inflate(comp: &[u8], want: usize) -> Option<Vec<u8>> {
     use ruzstd::io::Read;
@@ -422,15 +423,28 @@ impl<'a> Ktx2Transcoder<'a> {
         let start = usize::try_from(l.byte_offset).ok()?;
         let end = start.checked_add(usize::try_from(l.byte_length).ok()?)?;
         let comp = self.data.get(start..end)?;
-        // ss=2 (Zstandard): inflate the whole level to its uncompressed length
-        // before indexing the per-image data. ss=1 (BasisLZ) never reaches the
-        // raw-block path.
+        // One image is the level's block grid in the source's own block size,
+        // 16 bytes a block; the level holds max(layers, 1) * faces of them
+        // back to back.
+        let total_2d = grid_bytes(bx, by, 16)?;
+        let level_size = (self.header.layer_count.max(1) as usize)
+            .checked_mul(self.header.face_count.max(1) as usize)?
+            .checked_mul(total_2d)?;
+        // ss=2 (Zstandard): inflate the whole level before indexing the
+        // per-image data. ss=1 (BasisLZ) never reaches the raw-block path.
         let level_owned;
         let level_data: &[u8] = match self.header.supercompression {
             0 => comp,
             2 => {
-                let want = usize::try_from(l.uncompressed_byte_length).ok()?;
-                level_owned = zstd_inflate(comp, want)?;
+                // KTX2 defines a level's uncompressedByteLength as the size of
+                // its data, which for raw blocks is exactly the size the
+                // dimensions imply. A length that disagrees is refused before
+                // the inflate buffer is allocated, so the buffer is sized by
+                // the level's dimensions, never by the length field alone.
+                if l.uncompressed_byte_length != level_size as u64 {
+                    return None;
+                }
+                level_owned = zstd_inflate(comp, level_size)?;
                 &level_owned
             }
             _ => return None, // unknown supercompression scheme
@@ -444,7 +458,6 @@ impl<'a> Ktx2Transcoder<'a> {
         {
             return None;
         }
-        let total_2d = grid_bytes(bx, by, 16)?;
         let img_ofs = (layer as usize)
             .checked_mul(self.header.face_count.max(1) as usize)?
             .checked_add(face as usize)?
