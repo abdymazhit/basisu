@@ -201,7 +201,7 @@ fn truncated_input_never_panics() {
 fn valid_magic_with_garbage_body_never_panics() {
     for tail_len in [0usize, 16, 80, 200, 1024] {
         let mut data = KTX2_MAGIC.to_vec();
-        data.extend(std::iter::repeat(0xCD).take(tail_len));
+        data.extend(std::iter::repeat_n(0xCD, tail_len));
         let _ = Transcoder::new(&data);
     }
 }
