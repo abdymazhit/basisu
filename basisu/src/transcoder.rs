@@ -6,7 +6,9 @@
 
 use crate::basislz::etc1s::{Etc1sTranscoder, VideoState, MAX_PREV_FRAME_LEVELS};
 use crate::dispatch::{self, grid_bytes};
-use crate::ktx2::{BasisFormat, Ktx2Header, KTX2_SS_UASTC_HDR_6X6I, KTX2_SS_XUASTC_LDR};
+use crate::ktx2::{
+    BasisFormat, Ktx2Header, KTX2_SS_BASISLZ, KTX2_SS_UASTC_HDR_6X6I, KTX2_SS_XUASTC_LDR,
+};
 use alloc::vec::Vec;
 
 /// `KTX2_IMAGE_IS_P_FRAME`: an ETC1S image desc flag marking a predicted
@@ -119,7 +121,7 @@ impl<'a> Ktx2Transcoder<'a> {
             let desc_size = match (header.supercompression, header.format) {
                 (KTX2_SS_UASTC_HDR_6X6I, BasisFormat::UastcHdr6x6) => 12,
                 (KTX2_SS_XUASTC_LDR, BasisFormat::XuastcLdr(_)) => 12,
-                (1, _) => 8,
+                (KTX2_SS_BASISLZ, _) => 8,
                 _ => return None,
             };
             let image_count = image_count(&header)?;
@@ -143,52 +145,67 @@ impl<'a> Ktx2Transcoder<'a> {
             }
         }
 
-        if header.format == BasisFormat::Etc1s {
-            // BasisLZ global data header (20 bytes): endpoint/selector counts
-            // (u16 each), the endpoint/selector/table byte lengths (u32 each),
-            // and an extendedByteLength u32 this decoder never needs.
-            //
-            // The offset and the lengths below come from the file: the u64
-            // offset must fit `usize` (wasm32), and every sum is checked so
-            // none can wrap past a bounds check.
+        // ETC1S global data is decoded under BasisLZ only, as the reference's
+        // `start_transcoding` does: under any other scheme an ETC1S file
+        // opens with no codebooks, and every transcode of it fails.
+        if header.format == BasisFormat::Etc1s && header.supercompression == KTX2_SS_BASISLZ {
+            // The header parse placed the global data past the header and
+            // inside the file; each part below is read from that range alone,
+            // and must fit the length it declares (`ktx2_transcoder::
+            // decompress_etc1s_global_data`). Its offset and length are u64:
+            // they must fit `usize` (wasm32), and every sum is checked.
             let sgd = usize::try_from(header.sgd_byte_offset).ok()?;
-            if sgd.checked_add(20).is_none_or(|end| end > data.len()) {
+            let sgd_len = usize::try_from(header.sgd_byte_length).ok()?;
+            let gd = data.get(sgd..sgd.checked_add(sgd_len)?)?;
+
+            // BasisLZ global data header (20 bytes): endpoint/selector counts
+            // (u16 each), then the endpoint, selector, table and extended
+            // byte lengths (u32 each). The extended data is never read, but
+            // it is part of the declared layout.
+            if gd.len() < 20 {
                 return None;
             }
-            let num_e = rd16(data, sgd);
-            let num_s = rd16(data, sgd + 2);
-            let e_len = rd32(data, sgd + 4) as usize;
-            let s_len = rd32(data, sgd + 8) as usize;
-            let t_len = rd32(data, sgd + 12) as usize;
+            let num_e = rd16(gd, 0);
+            let num_s = rd16(gd, 2);
+            let e_len = rd32(gd, 4) as usize;
+            let s_len = rd32(gd, 8) as usize;
+            let t_len = rd32(gd, 12) as usize;
+            let x_len = rd32(gd, 16) as usize;
+            if e_len == 0 || s_len == 0 || t_len == 0 || num_e == 0 || num_s == 0 {
+                return None;
+            }
 
+            // The header, one 20-byte desc per image, the three payloads and
+            // the extended data, in that order, within the declared length.
             let image_count = image_count(&header)?;
-            let descs_end = image_count.checked_mul(20)?.checked_add(sgd + 20)?;
-            if descs_end > data.len() {
-                return None;
-            }
-            for i in 0..image_count {
-                let o = sgd + 20 + 20 * i;
-                image_descs.push(Etc1sImageDesc {
-                    image_flags: rd32(data, o),
-                    rgb_ofs: rd32(data, o + 4),
-                    rgb_len: rd32(data, o + 8),
-                    alpha_ofs: rd32(data, o + 12),
-                    alpha_len: rd32(data, o + 16),
-                });
-            }
-
-            // The payloads follow the image descs in a fixed order: endpoint
-            // codebook, selector codebook, Huffman tables.
+            let descs_end = image_count.checked_mul(20)?.checked_add(20)?;
             let e_ofs = descs_end;
             let s_ofs = e_ofs.checked_add(e_len)?;
             let t_ofs = s_ofs.checked_add(s_len)?;
             let t_end = t_ofs.checked_add(t_len)?;
-            if t_end > data.len() {
+            if t_end.checked_add(x_len)? > gd.len() {
                 return None;
             }
+            for i in 0..image_count {
+                let o = 20 + 20 * i;
+                let desc = Etc1sImageDesc {
+                    image_flags: rd32(gd, o),
+                    rgb_ofs: rd32(gd, o + 4),
+                    rgb_len: rd32(gd, o + 8),
+                    alpha_ofs: rd32(gd, o + 12),
+                    alpha_len: rd32(gd, o + 16),
+                };
+                // Every image has a color slice, and an alpha slice too when
+                // the file carries alpha.
+                if desc.rgb_len == 0 || (header.has_alpha && desc.alpha_len == 0) {
+                    return None;
+                }
+                image_descs.push(desc);
+            }
+
             let mut t = Etc1sTranscoder::new();
-            if !t.decode_palettes(num_e, &data[e_ofs..s_ofs], num_s, &data[s_ofs..t_ofs])
-                || !t.decode_tables(&data[t_ofs..t_end])
+            if !t.decode_palettes(num_e, &gd[e_ofs..s_ofs], num_s, &gd[s_ofs..t_ofs])
+                || !t.decode_tables(&gd[t_ofs..t_end])
             {
                 return None;
             }

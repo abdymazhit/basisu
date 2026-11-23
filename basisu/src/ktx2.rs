@@ -74,6 +74,15 @@ fn astc_ldr_block_from_unorm_vk(vk: u32) -> Option<AstcBlock> {
 /// KTX2 spec limit).
 const KTX2_MAX_SUPPORTED_LEVEL_COUNT: u32 = 16;
 
+/// `sizeof(ktx2_header)`: the fixed header the level index follows. Every
+/// other block of the file (the level index, the DFD, the key/value data, the
+/// supercompression global data, the levels) lies past it.
+const KTX2_HEADER_SIZE: usize = 80;
+
+/// `KTX2_SS_BASISLZ`: the scheme whose global data holds the ETC1S
+/// codebooks (and, in the old v1.6/v2.0 presentation, the intermediate
+/// formats' slice descs).
+pub(crate) const KTX2_SS_BASISLZ: u32 = 1;
 /// `KTX2_SS_ZSTANDARD`: the highest supercompression scheme the shared
 /// LDR/HDR level path decodes (0 none, 1 BasisLZ, 2 Zstandard).
 const KTX2_SS_ZSTANDARD: u32 = 2;
@@ -194,7 +203,7 @@ impl Ktx2Header {
     /// model, or a texture shape this crate rejects: 1D/3D, DEFLATE
     /// supercompression, bad face/level counts).
     pub fn parse(data: &[u8]) -> Option<Ktx2Header> {
-        if data.len() < 80 || data[..12] != KTX2_MAGIC {
+        if data.len() < KTX2_HEADER_SIZE || data[..12] != KTX2_MAGIC {
             return None;
         }
         // vkFormat gate: 0 (UNDEFINED) for ETC1S/UASTC LDR payloads, the ASTC
@@ -256,15 +265,32 @@ impl Ktx2Header {
         let sgd_byte_offset = rd64(data, 64);
         let sgd_byte_length = rd64(data, 72);
 
-        // Level index: max(level_count, 1) entries of 24 bytes at offset 80.
+        // Supercompression global data: the schemes that carry it (BasisLZ
+        // and the two intermediate schemes) must place it past the header and
+        // wholly inside the file, as `ktx2_transcoder::init` checks. The end is
+        // a checked sum (the reference adds the two u64 fields unchecked), so
+        // every later read of the global data stays inside this range.
+        if matches!(
+            supercompression,
+            KTX2_SS_BASISLZ | KTX2_SS_UASTC_HDR_6X6I | KTX2_SS_XUASTC_LDR
+        ) && (sgd_byte_offset < KTX2_HEADER_SIZE as u64
+            || sgd_byte_offset
+                .checked_add(sgd_byte_length)
+                .is_none_or(|end| end > data.len() as u64))
+        {
+            return None;
+        }
+
+        // Level index: max(level_count, 1) entries of 24 bytes after the
+        // header.
         let num_levels = level_count.max(1) as usize;
-        let li_end = 80 + num_levels * 24;
+        let li_end = KTX2_HEADER_SIZE + num_levels * 24;
         if li_end > data.len() {
             return None;
         }
         let mut levels = Vec::with_capacity(num_levels);
         for i in 0..num_levels {
-            let o = 80 + i * 24;
+            let o = KTX2_HEADER_SIZE + i * 24;
             let l = LevelIndex {
                 byte_offset: rd64(data, o),
                 byte_length: rd64(data, o + 8),
@@ -276,7 +302,7 @@ impl Ktx2Header {
             // frames).
             match supercompression {
                 KTX2_SS_ZSTANDARD if l.uncompressed_byte_length == 0 => return None,
-                1 | KTX2_SS_UASTC_HDR_6X6I | KTX2_SS_XUASTC_LDR
+                KTX2_SS_BASISLZ | KTX2_SS_UASTC_HDR_6X6I | KTX2_SS_XUASTC_LDR
                     if l.uncompressed_byte_length != 0 =>
                 {
                     return None

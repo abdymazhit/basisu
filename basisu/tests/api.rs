@@ -499,6 +499,101 @@ fn a_zstd_length_that_disagrees_with_the_dimensions_is_refused() {
     }
 }
 
+/// Header fields the global data tests patch: `supercompressionScheme` and
+/// `sgdByteLength` (u64), and the DFD byte length (u32), whose 60-byte form
+/// declares an ETC1S file's alpha slices.
+const KTX2_SUPERCOMPRESSION: usize = 44;
+const KTX2_DFD_BYTE_LENGTH: usize = 52;
+const KTX2_SGD_BYTE_LENGTH: usize = 72;
+
+// UASTC HDR 6x6 and XUASTC under their Khronos schemes (4 and 5), with the
+// 12-byte slice descs.
+const XUASTC_ARITH: &[u8] = include_bytes!("../../corpus/smoke/xuastc_arith_12x12.ktx2");
+
+/// The ETC1S global data must lie past the 80-byte header and inside the
+/// file, as `ktx2_transcoder::init` requires of every scheme that carries
+/// it. The port read it from wherever the offset pointed (the header itself
+/// included) and never looked at its length, so a global data block that
+/// ran off the end of the file (or whose end wrapped) still opened.
+#[test]
+fn global_data_outside_the_file_or_inside_the_header_is_refused() {
+    let sgd = read_u64(ETC1S, KTX2_SGD_BYTE_OFFSET);
+    let sgd_len = read_u64(ETC1S, KTX2_SGD_BYTE_LENGTH);
+    let past_end = ETC1S.len() as u64 - sgd + 1;
+    for len in [past_end, u64::MAX, u64::MAX - sgd + 1] {
+        let data = with_u64(ETC1S, KTX2_SGD_BYTE_LENGTH, len);
+        assert!(
+            matches!(Transcoder::new(&data), Err(Error::InvalidData)),
+            "{len:#x}"
+        );
+    }
+    // Exactly to the end of the file is fine.
+    let data = with_u64(ETC1S, KTX2_SGD_BYTE_LENGTH, ETC1S.len() as u64 - sgd);
+    assert!(Transcoder::new(&data).is_ok());
+    assert!(sgd_len < ETC1S.len() as u64 - sgd);
+
+    // The intermediate formats' slice descs: an offset inside the header
+    // read header bytes as descs. 76 makes XUASTC's single desc the
+    // header's last word and the level offset, a nonzero length.
+    for (file, offset) in [
+        (XUASTC_OLD_SCHEME, 76),
+        (XUASTC_ARITH, 0),
+        (UASTC_HDR_6X6_MIP, 20),
+        (UASTC_HDR_6X6_MIP, 79),
+    ] {
+        assert!(Transcoder::new(file).is_ok());
+        let data = with_u64(file, KTX2_SGD_BYTE_OFFSET, offset);
+        assert!(
+            matches!(Transcoder::new(&data), Err(Error::InvalidData)),
+            "{offset}"
+        );
+    }
+}
+
+/// `ktx2_transcoder::decompress_etc1s_global_data` requires the global data
+/// header, one 20-byte desc per image, the endpoint, selector and table
+/// payloads and the extended data to fit `sgdByteLength`, all three payloads
+/// and both codebook counts to be nonzero, and every image to have a color
+/// slice (and an alpha slice in an alpha file). The port checked only that
+/// the payloads ended inside the file, so it read past the global data into
+/// the level data, and opened files whose transcodes could only fail.
+#[test]
+fn etc1s_global_data_is_checked_like_the_reference() {
+    let sgd = read_u64(ETC1S, KTX2_SGD_BYTE_OFFSET) as usize;
+    let sgd_len = read_u64(ETC1S, KTX2_SGD_BYTE_LENGTH);
+    let first_desc = sgd + 20;
+    let refused = [
+        // The parts fill the global data exactly: one byte less, or one
+        // byte of extended data more, no longer fits.
+        with_u64(ETC1S, KTX2_SGD_BYTE_LENGTH, sgd_len - 1),
+        with_u64(ETC1S, KTX2_SGD_BYTE_LENGTH, 19),
+        with_u32(ETC1S, sgd + 16, 1),
+        // Empty codebooks.
+        with_u32(ETC1S, sgd, 0),
+        with_u32(ETC1S, sgd, 0x0011_0000),
+        with_u32(ETC1S, sgd, 0x0000_0047),
+        // An image with no color slice.
+        with_u32(ETC1S, first_desc + 8, 0),
+        // A 60-byte DFD declares alpha, and no image has an alpha slice.
+        with_u32(ETC1S, KTX2_DFD_BYTE_LENGTH, 60),
+    ];
+    for (i, data) in refused.iter().enumerate() {
+        assert!(
+            matches!(Transcoder::new(data), Err(Error::InvalidData)),
+            "case {i}"
+        );
+    }
+
+    // ETC1S global data exists only under BasisLZ: under no
+    // supercompression the file opens without codebooks and its transcodes
+    // fail, as the reference never decodes it there.
+    let data = with_u32(ETC1S, KTX2_SUPERCOMPRESSION, 0);
+    let t = Transcoder::new(&data).unwrap();
+    assert!(t
+        .transcode(0, TargetFormat::Rgba32, DecodeFlags::NONE)
+        .is_err());
+}
+
 /// Both Basis Universal containers open through the same `Transcoder::new`,
 /// with codec, alpha, and dimension metadata intact.
 #[test]
