@@ -7,6 +7,7 @@
 
 use crate::api::AstcBlock;
 use alloc::vec::Vec;
+use core::ops::Range;
 
 /// The 12-byte KTX2 file identifier every valid file starts with.
 const KTX2_MAGIC: [u8; 12] = [
@@ -79,6 +80,11 @@ const KTX2_MAX_SUPPORTED_LEVEL_COUNT: u32 = 16;
 /// supercompression global data, the levels) lies past it.
 const KTX2_HEADER_SIZE: usize = 80;
 
+/// `MAX_SANE_LEVEL_UNCOMP_SIZE`: `ktx2_transcoder::init` refuses a level whose
+/// `uncompressedByteLength` is this (2 GiB) or more, whatever the
+/// supercompression.
+const KTX2_MAX_LEVEL_UNCOMPRESSED_SIZE: u64 = 2048 * 1024 * 1024;
+
 /// `KTX2_SS_BASISLZ`: the scheme whose global data holds the ETC1S
 /// codebooks (and, in the old v1.6/v2.0 presentation, the intermediate
 /// formats' slice descs).
@@ -144,6 +150,16 @@ pub struct LevelIndex {
     pub byte_length: u64,
     /// Length the level data decompresses to under Zstandard supercompression.
     pub uncompressed_byte_length: u64,
+}
+
+impl LevelIndex {
+    /// The level's bytes in the file, `byte_offset..byte_offset +
+    /// byte_length`. `None` if an end does not fit `usize` (wasm32) or the
+    /// sum overflows.
+    pub fn byte_range(&self) -> Option<Range<usize>> {
+        let start = usize::try_from(self.byte_offset).ok()?;
+        Some(start..start.checked_add(usize::try_from(self.byte_length).ok()?)?)
+    }
 }
 
 /// Parsed KTX2 container metadata for a Basis Universal payload.
@@ -298,6 +314,16 @@ impl Ktx2Header {
                 byte_length: rd64(data, o + 8),
                 uncompressed_byte_length: rd64(data, o + 16),
             };
+            // Every level lies past the header and wholly inside the file (its
+            // end a checked sum, where the reference adds the two u64 fields
+            // unchecked), and none inflates to 2 GiB or more. A level of no
+            // bytes is only reported by the reference, not refused.
+            if l.byte_range()
+                .is_none_or(|r| r.start < KTX2_HEADER_SIZE || r.end > data.len())
+                || l.uncompressed_byte_length >= KTX2_MAX_LEVEL_UNCOMPRESSED_SIZE
+            {
+                return None;
+            }
             // Per-level `uncompressedByteLength` sanity: Zstandard levels must
             // record a nonzero uncompressed size; the BasisLZ and intermediate
             // schemes must record zero (their payloads are not per-level

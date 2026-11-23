@@ -296,42 +296,43 @@ fn an_intermediate_sgd_end_or_image_count_that_overflows_is_refused() {
 }
 
 /// A level's data offset near `u64::MAX`: the end of the level (raw UASTC)
-/// or of an image's slice within it (ETC1S, XUASTC) overflowed. The level
-/// index is only read at transcode time, so the file opens and the transcode
-/// fails.
+/// or of an image's slice within it (ETC1S, XUASTC) overflowed. Every level
+/// must lie inside the file, its end a checked sum, so such a file is refused
+/// at open; it used to open and fail its transcodes. (The reference adds the
+/// two u64 fields unchecked: the end wraps back into the file, and
+/// `ktx2_transcoder::init` accepts it.)
 #[test]
-fn a_level_offset_near_u64_max_fails_the_transcode() {
+fn a_level_offset_near_u64_max_is_refused() {
     for file in [ETC1S, UASTC, XUASTC_OLD_SCHEME] {
         let data = with_u64(file, KTX2_LEVEL0_BYTE_OFFSET, u64::MAX - 1);
-        let t = Transcoder::new(&data).unwrap();
-        assert!(t
-            .transcode(0, TargetFormat::Rgba32, DecodeFlags::NONE)
-            .is_err());
+        assert!(matches!(Transcoder::new(&data), Err(Error::InvalidData)));
     }
 }
 
 /// On a 32-bit `usize` (wasm32) an offset past 4 GiB lost its high bits to
 /// an `as usize` cast, so the codebooks or a level were read from the wrong
 /// place without an error, and a sum of in-file offsets and u32 lengths (the
-/// codebook lengths, the image count) could wrap. All of them are refused on
-/// every target; on a 64-bit host they simply lie past the end of the file.
-/// `tests/wasm.rs` runs the same cases under wasm32.
+/// codebook lengths, the image count) could wrap. All of them are refused at
+/// open on every target; on a 64-bit host they simply lie past the end of
+/// the file. `tests/wasm.rs` runs the same cases under wasm32.
 #[test]
 fn offsets_and_sums_past_4_gib_are_refused() {
     let sgd = read_u64(ETC1S, KTX2_SGD_BYTE_OFFSET);
     let past_4_gib = with_u64(ETC1S, KTX2_SGD_BYTE_OFFSET, sgd + (1 << 32));
     let endpoints_len = with_u32(ETC1S, sgd as usize + 4, u32::MAX);
     let layers = with_u32(ETC1S, KTX2_LAYER_COUNT, u32::MAX);
-    for data in [past_4_gib, endpoints_len, layers] {
-        assert!(matches!(Transcoder::new(&data), Err(Error::InvalidData)));
-    }
-    for file in [ETC1S, UASTC] {
+    let level_past_4_gib = |file: &[u8]| {
         let level0 = read_u64(file, KTX2_LEVEL0_BYTE_OFFSET);
-        let data = with_u64(file, KTX2_LEVEL0_BYTE_OFFSET, level0 + (1 << 32));
-        let t = Transcoder::new(&data).unwrap();
-        assert!(t
-            .transcode(0, TargetFormat::Rgba32, DecodeFlags::NONE)
-            .is_err());
+        with_u64(file, KTX2_LEVEL0_BYTE_OFFSET, level0 + (1 << 32))
+    };
+    for data in [
+        past_4_gib,
+        endpoints_len,
+        layers,
+        level_past_4_gib(ETC1S),
+        level_past_4_gib(UASTC),
+    ] {
+        assert!(matches!(Transcoder::new(&data), Err(Error::InvalidData)));
     }
 }
 
@@ -466,7 +467,8 @@ const KTX2_LEVEL0_UNCOMPRESSED_LENGTH: usize = KTX2_LEVEL0_BYTE_OFFSET + 16;
 /// `isize::MAX` (a capacity-overflow panic), and anything short of that a
 /// buffer as large as the field claimed. The field must now equal the
 /// level size the dimensions imply (KTX2 defines it as the size of the
-/// level's data), checked before the buffer is allocated.
+/// level's data), checked before the buffer is allocated. From 2 GiB up the
+/// file is refused at open, as `ktx2_transcoder::init` refuses it.
 #[test]
 #[cfg(all(feature = "zstd", feature = "hdr"))]
 fn a_zstd_length_that_disagrees_with_the_dimensions_is_refused() {
@@ -476,7 +478,14 @@ fn a_zstd_length_that_disagrees_with_the_dimensions_is_refused() {
     let t = Transcoder::new(UASTC_HDR_ZSTD).unwrap();
     assert!(t.transcode(0, target, DecodeFlags::NONE).is_ok());
 
-    for ulen in [u64::MAX, 1 << 63, exact + 16, exact - 16, exact * 2, 1] {
+    for ulen in [u64::MAX, 1 << 63, 1 << 31] {
+        let data = with_u64(UASTC_HDR_ZSTD, KTX2_LEVEL0_UNCOMPRESSED_LENGTH, ulen);
+        assert!(
+            matches!(Transcoder::new(&data), Err(Error::InvalidData)),
+            "{ulen:#x}"
+        );
+    }
+    for ulen in [(1 << 31) - 1, exact + 16, exact - 16, exact * 2, 1] {
         let data = with_u64(UASTC_HDR_ZSTD, KTX2_LEVEL0_UNCOMPRESSED_LENGTH, ulen);
         let t = Transcoder::new(&data).unwrap();
         assert!(
@@ -488,7 +497,7 @@ fn a_zstd_length_that_disagrees_with_the_dimensions_is_refused() {
     // The same through a mip chain: only the level whose length disagrees
     // fails.
     let mip = include_bytes!("../../corpus/smoke/astc_hdr_6x6_zstd.ktx2");
-    let data = with_u64(mip, KTX2_LEVEL0_UNCOMPRESSED_LENGTH, u64::MAX);
+    let data = with_u64(mip, KTX2_LEVEL0_UNCOMPRESSED_LENGTH, (1 << 31) - 1);
     let t = Transcoder::new(&data).unwrap();
     assert!(t.transcode(0, target, DecodeFlags::NONE).is_err());
     for level in 1..t.level_count() {
@@ -725,6 +734,43 @@ fn key_value_data_is_read_like_the_reference() {
     ]);
     // No key/value data at all is fine.
     assert!(Transcoder::new(&without_kvd(UASTC)).is_ok());
+}
+
+/// `ktx2_transcoder::init` refuses a level that starts inside the header or
+/// ends past the file, and one whose `uncompressedByteLength` is 2 GiB or
+/// more under any supercompression. The port read the level index only to
+/// transcode, so such a file opened and its transcodes failed, or read
+/// header bytes as level data.
+#[test]
+fn levels_inside_the_header_past_the_file_or_of_2_gib_are_refused() {
+    let level = |i: usize| KTX2_LEVEL0_BYTE_OFFSET + 24 * i;
+    // UASTC's level 0 ends the file; level 5 is 16 bytes long (2 in ETC1S).
+    let level0_len = read_u64(UASTC, level(0) + 8);
+    assert_eq!(read_u64(UASTC, level(0)) + level0_len, UASTC.len() as u64);
+    assert_refused(&[
+        (
+            "UASTC level inside the header",
+            with_u64(UASTC, level(5), 64),
+        ),
+        (
+            "ETC1S level inside the header",
+            with_u64(ETC1S, level(5), 0),
+        ),
+        (
+            "past the file",
+            with_u64(UASTC, level(0) + 8, level0_len + 1),
+        ),
+        (
+            "2 GiB uncompressed",
+            with_u64(UASTC, level(0) + 16, 1 << 31),
+        ),
+    ]);
+    // Just under 2 GiB opens (UASTC with no supercompression does not use
+    // the field), and so does a level of no bytes, which the reference
+    // reports but does not refuse.
+    for (at, value) in [(level(0) + 16, (1 << 31) - 1), (level(5) + 8, 0)] {
+        assert!(Transcoder::new(&with_u64(UASTC, at, value)).is_ok());
+    }
 }
 
 /// Byte offsets the `.basis` tests patch: the header's data size (u32) and,
