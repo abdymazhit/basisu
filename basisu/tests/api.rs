@@ -19,6 +19,18 @@ const BASIS_ETC1S: &[u8] = include_bytes!("../../corpus/smoke/kodim20.basis");
 const BASIS_ETC1S_ALPHA: &[u8] = include_bytes!("../../corpus/smoke/alpha3.basis");
 const BASIS_UASTC: &[u8] = include_bytes!("../../corpus/smoke/kodim03_uastc.basis");
 
+// The two layouts of the intermediate formats' per-image slice descs in the
+// supercompression global data: UASTC HDR 6x6 (scheme 4, 12-byte descs, five
+// levels) and XUASTC LDR in the old-style scheme-1 presentation (8-byte descs).
+const UASTC_HDR_6X6_MIP: &[u8] = include_bytes!("../../corpus/smoke/uastc_hdr_6x6i_mip.ktx2");
+const XUASTC_OLD_SCHEME: &[u8] = include_bytes!("../../corpus/smoke/xuastc_5x4_oldscheme.ktx2");
+
+// The texture of a kazmaps-gl fuzz crash (target `glb_tile_etc1s`, input
+// `crash-f197dff0687e8dd9af95c39670d2249ccf130ac1`): the KTX2 image's
+// bufferView cut out of the fuzzed GLB as is. An 8x8 ETC1S texture with four
+// levels whose supercompression global data offset is `u64::MAX`.
+const FUZZ_SGD_OFFSET_MAX: &[u8] = include_bytes!("fixtures/fuzz_etc1s_sgd_offset_max.ktx2");
+
 // An ETC1S video (`tex_type` video frames, P-frame conditional replenishment).
 // Decodes through the stateful video API, one frame at a time in order; the
 // stateless entry points reject it.
@@ -201,8 +213,122 @@ fn truncated_input_never_panics() {
 fn valid_magic_with_garbage_body_never_panics() {
     for tail_len in [0usize, 16, 80, 200, 1024] {
         let mut data = KTX2_MAGIC.to_vec();
-        data.extend(std::iter::repeat(0xCD).take(tail_len));
+        data.extend(std::iter::repeat_n(0xCD, tail_len));
         let _ = Transcoder::new(&data);
+    }
+}
+
+/// KTX2 header fields the offset tests below patch: `layerCount` (u32),
+/// `sgdByteOffset` (u64), and level 0's `byteOffset` (u64), the first field
+/// of the level index.
+const KTX2_LAYER_COUNT: usize = 32;
+const KTX2_SGD_BYTE_OFFSET: usize = 64;
+const KTX2_LEVEL0_BYTE_OFFSET: usize = 80;
+
+/// The little-endian u64 at byte `at` of `file`.
+fn read_u64(file: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(file[at..at + 8].try_into().unwrap())
+}
+
+/// A copy of `file` with the little-endian u64 at byte `at` set to `value`.
+fn with_u64(file: &[u8], at: usize, value: u64) -> Vec<u8> {
+    let mut data = file.to_vec();
+    data[at..at + 8].copy_from_slice(&value.to_le_bytes());
+    data
+}
+
+/// A copy of `file` with the little-endian u32 at byte `at` set to `value`.
+fn with_u32(file: &[u8], at: usize, value: u32) -> Vec<u8> {
+    let mut data = file.to_vec();
+    data[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    data
+}
+
+/// The supercompression global data offset is a u64 straight from the file.
+/// Near `u64::MAX` the end of the ETC1S global data header (`offset + 20`)
+/// overflowed: a panic with overflow checks, and in release a wrapped sum
+/// that passed the bounds check and indexed past the file. Such a file is
+/// refused like any other out-of-range offset.
+#[test]
+fn an_etc1s_sgd_offset_near_u64_max_is_refused() {
+    for offset in [u64::MAX, u64::MAX - 19, u64::MAX - 20, 1 << 63] {
+        let data = with_u64(ETC1S, KTX2_SGD_BYTE_OFFSET, offset);
+        assert!(
+            matches!(Transcoder::new(&data), Err(Error::InvalidData)),
+            "{offset:#x}"
+        );
+    }
+}
+
+/// The fuzzed texture itself: refused, not a panic.
+#[test]
+fn the_fuzzed_etc1s_texture_is_refused() {
+    assert_eq!(
+        read_u64(FUZZ_SGD_OFFSET_MAX, KTX2_SGD_BYTE_OFFSET),
+        u64::MAX
+    );
+    assert!(matches!(
+        Transcoder::new(FUZZ_SGD_OFFSET_MAX),
+        Err(Error::InvalidData)
+    ));
+}
+
+/// The intermediate formats' slice descs sit at the same offset, and their
+/// end overflowed the same way. So did the image count `levels * layers *
+/// faces`, a `u32` product, under a huge layer count.
+#[test]
+fn an_intermediate_sgd_end_or_image_count_that_overflows_is_refused() {
+    for file in [UASTC_HDR_6X6_MIP, XUASTC_OLD_SCHEME] {
+        assert!(Transcoder::new(file).is_ok());
+        for offset in [u64::MAX, u64::MAX - 7] {
+            let data = with_u64(file, KTX2_SGD_BYTE_OFFSET, offset);
+            assert!(
+                matches!(Transcoder::new(&data), Err(Error::InvalidData)),
+                "{offset:#x}"
+            );
+        }
+    }
+    let data = with_u32(UASTC_HDR_6X6_MIP, KTX2_LAYER_COUNT, u32::MAX);
+    assert!(matches!(Transcoder::new(&data), Err(Error::InvalidData)));
+}
+
+/// A level's data offset near `u64::MAX`: the end of the level (raw UASTC)
+/// or of an image's slice within it (ETC1S, XUASTC) overflowed. The level
+/// index is only read at transcode time, so the file opens and the transcode
+/// fails.
+#[test]
+fn a_level_offset_near_u64_max_fails_the_transcode() {
+    for file in [ETC1S, UASTC, XUASTC_OLD_SCHEME] {
+        let data = with_u64(file, KTX2_LEVEL0_BYTE_OFFSET, u64::MAX - 1);
+        let t = Transcoder::new(&data).unwrap();
+        assert!(t
+            .transcode(0, TargetFormat::Rgba32, DecodeFlags::NONE)
+            .is_err());
+    }
+}
+
+/// On a 32-bit `usize` (wasm32) an offset past 4 GiB lost its high bits to
+/// an `as usize` cast, so the codebooks or a level were read from the wrong
+/// place without an error, and a sum of in-file offsets and u32 lengths (the
+/// codebook lengths, the image count) could wrap. All of them are refused on
+/// every target; on a 64-bit host they simply lie past the end of the file.
+/// `tests/wasm.rs` runs the same cases under wasm32.
+#[test]
+fn offsets_and_sums_past_4_gib_are_refused() {
+    let sgd = read_u64(ETC1S, KTX2_SGD_BYTE_OFFSET);
+    let past_4_gib = with_u64(ETC1S, KTX2_SGD_BYTE_OFFSET, sgd + (1 << 32));
+    let endpoints_len = with_u32(ETC1S, sgd as usize + 4, u32::MAX);
+    let layers = with_u32(ETC1S, KTX2_LAYER_COUNT, u32::MAX);
+    for data in [past_4_gib, endpoints_len, layers] {
+        assert!(matches!(Transcoder::new(&data), Err(Error::InvalidData)));
+    }
+    for file in [ETC1S, UASTC] {
+        let level0 = read_u64(file, KTX2_LEVEL0_BYTE_OFFSET);
+        let data = with_u64(file, KTX2_LEVEL0_BYTE_OFFSET, level0 + (1 << 32));
+        let t = Transcoder::new(&data).unwrap();
+        assert!(t
+            .transcode(0, TargetFormat::Rgba32, DecodeFlags::NONE)
+            .is_err());
     }
 }
 
