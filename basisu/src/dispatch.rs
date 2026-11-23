@@ -233,6 +233,9 @@ pub fn transcode_uastc(
     out: &mut [u8],
 ) -> Option<()> {
     let n = grid_len(bx, by)?;
+    // A `.basis` slice's byte length is recorded apart from its block counts:
+    // the image must hold every block the loops below read.
+    let img = img.get(..n.checked_mul(16)?)?;
 
     // PVRTC1 is image-global: it can't go through the per-block loop. Build the
     // whole image at once (per-block bounding-box endpoints, then a whole-image

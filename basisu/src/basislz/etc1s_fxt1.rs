@@ -191,9 +191,11 @@ impl Etc1sTranscoder {
                 let (ei, si) = indices[(block_x + block_y * num_blocks_x) as usize];
                 let fxt1_block_x = block_x >> 1;
                 let fxt1_subblock = block_x & 1;
+                // Past the FXT1 grid only if the 4x4 grid is wider or taller
+                // than the pixel size implies.
                 let dst = (fxt1_block_x + block_y * fxt1_blocks_x) as usize;
                 convert_etc1s_to_fxt1(
-                    &mut blocks[dst],
+                    blocks.get_mut(dst)?,
                     &self.endpoints[ei as usize],
                     &self.selectors[si as usize],
                     fxt1_subblock,

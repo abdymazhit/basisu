@@ -205,3 +205,13 @@ fn a_zstd_length_past_the_level_size_is_refused_under_wasm() {
         .transcode(0, TargetFormat::RgbaHalf, DecodeFlags::NONE)
         .is_ok());
 }
+
+/// The `.basis` header's data size is a u32 added to the header size: here
+/// `77 + u32::MAX` overflowed `usize` (a panic with overflow checks). It is
+/// a checked sum, refused like any size past the file.
+#[wasm_bindgen_test]
+fn a_basis_data_size_past_usize_is_refused_under_wasm() {
+    let data = with_u32(BASIS, 8, u32::MAX);
+    assert!(Transcoder::new(&data).is_err());
+    assert!(Transcoder::new(BASIS).is_ok());
+}

@@ -84,8 +84,8 @@ fn transcode_half(
             let mut texels = [[0u16; 4]; 16];
             decode::decode_block_hdr16(&log, 4, 4, &mut texels)?;
 
-            let max_x = 4.min(lw - block_x * 4);
-            let max_y = 4.min(lh - block_y * 4);
+            let max_x = lw.saturating_sub(block_x.saturating_mul(4)).min(4);
+            let max_y = lh.saturating_sub(block_y.saturating_mul(4)).min(4);
             for y in 0..max_y {
                 for x in 0..max_x {
                     let t = &texels[(x + y * 4) as usize];
@@ -154,8 +154,8 @@ pub fn transcode_rgb_9e5(
             let mut texels = [0u32; 16];
             decode::decode_block_9e5(&log, 4, 4, &mut texels)?;
 
-            let max_x = 4.min(lw - block_x * 4);
-            let max_y = 4.min(lh - block_y * 4);
+            let max_x = lw.saturating_sub(block_x.saturating_mul(4)).min(4);
+            let max_y = lh.saturating_sub(block_y.saturating_mul(4)).min(4);
             for y in 0..max_y {
                 for x in 0..max_x {
                     let o = ((block_x * 4 + x) + (block_y * 4 + y) * lw) as usize * 4;

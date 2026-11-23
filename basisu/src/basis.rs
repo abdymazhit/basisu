@@ -84,6 +84,20 @@ pub enum BasisSourceFormat {
     XuastcLdr(AstcBlock),
 }
 
+impl BasisSourceFormat {
+    /// Source block dimensions `(width, height)` in texels: the unit of a
+    /// slice's recorded block counts.
+    fn block_dims(self) -> (u32, u32) {
+        match self {
+            BasisSourceFormat::Etc1s
+            | BasisSourceFormat::Uastc
+            | BasisSourceFormat::UastcHdr4x4 => (4, 4),
+            BasisSourceFormat::AstcLdr(b) | BasisSourceFormat::XuastcLdr(b) => b.dims(),
+            BasisSourceFormat::AstcHdr6x6 | BasisSourceFormat::UastcHdr6x6 => (6, 6),
+        }
+    }
+}
+
 /// One parsed `basis_slice_desc` entry (the fields we use).
 #[derive(Clone, Copy, Debug)]
 struct SliceDesc {
@@ -187,8 +201,13 @@ impl<'a> BasisTranscoder<'a> {
             return None;
         }
 
+        // The header's data size is a u32: past the header it can overflow
+        // a 32-bit `usize` (wasm32), so the sum is checked.
         let data_size = rd32(data, 8) as usize;
-        if data.len() < HEADER_SIZE as usize + data_size {
+        if (HEADER_SIZE as usize)
+            .checked_add(data_size)
+            .is_none_or(|end| data.len() < end)
+        {
             return None;
         }
 
@@ -520,6 +539,16 @@ impl<'a> BasisTranscoder<'a> {
         let s = self.find_first_slice(image, level)?;
         let (bx, by) = (s.num_blocks_x, s.num_blocks_y);
         let (lw, lh) = (s.orig_width, s.orig_height);
+        // A slice records its block counts apart from its pixel size, and the
+        // codecs index the output by both: a grid with no blocks, or wider or
+        // taller than the pixel size needs, would index past the output (or
+        // size scratch buffers and video state from the counts alone). The
+        // encoder writes `ceil(orig / block)`; a smaller grid only leaves
+        // texels unwritten.
+        let (bw, bh) = self.format.block_dims();
+        if bx == 0 || by == 0 || bx > lw.div_ceil(bw) || by > lh.div_ceil(bh) {
+            return None;
+        }
         match self.format {
             BasisSourceFormat::Etc1s => {
                 let t = self.etc1s.as_ref()?;

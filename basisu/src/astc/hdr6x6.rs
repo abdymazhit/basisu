@@ -20,8 +20,9 @@ pub(crate) fn transcode_half(
     ncomp: usize,
     out: &mut [u8],
 ) -> Option<()> {
-    // The block index below is `u32` math over the whole grid.
-    grid_bytes(bx, by, 16)?;
+    // Every block the loops below read, and a grid whose block index fits
+    // `u32`.
+    let img = img.get(..grid_bytes(bx, by, 16)?)?;
     if Some(out.len()) != grid_bytes(lw, lh, 2 * ncomp) {
         return None;
     }
@@ -34,8 +35,8 @@ pub(crate) fn transcode_half(
             let mut texels = [[0u16; 4]; 36];
             decode::decode_block_hdr16(&log, 6, 6, &mut texels)?;
 
-            let max_x = 6.min(lw - block_x * 6);
-            let max_y = 6.min(lh - block_y * 6);
+            let max_x = lw.saturating_sub(block_x.saturating_mul(6)).min(6);
+            let max_y = lh.saturating_sub(block_y.saturating_mul(6)).min(6);
             for y in 0..max_y {
                 for x in 0..max_x {
                     let t = &texels[(x + y * 6) as usize];
@@ -61,8 +62,9 @@ pub(crate) fn transcode_9e5(
     lh: u32,
     out: &mut [u8],
 ) -> Option<()> {
-    // The block index below is `u32` math over the whole grid.
-    grid_bytes(bx, by, 16)?;
+    // Every block the loops below read, and a grid whose block index fits
+    // `u32`.
+    let img = img.get(..grid_bytes(bx, by, 16)?)?;
     if Some(out.len()) != grid_bytes(lw, lh, 4) {
         return None;
     }
@@ -75,8 +77,8 @@ pub(crate) fn transcode_9e5(
             let mut texels = [0u32; 36];
             decode::decode_block_9e5(&log, 6, 6, &mut texels)?;
 
-            let max_x = 6.min(lw - block_x * 6);
-            let max_y = 6.min(lh - block_y * 6);
+            let max_x = lw.saturating_sub(block_x.saturating_mul(6)).min(6);
+            let max_y = lh.saturating_sub(block_y.saturating_mul(6)).min(6);
             for y in 0..max_y {
                 for x in 0..max_x {
                     let o = ((block_x * 6 + x) + (block_y * 6 + y) * lw) as usize * 4;
@@ -108,8 +110,9 @@ pub(crate) fn transcode_bc6h(
 ) -> Option<()> {
     let ndx = lw.div_ceil(4);
     let ndy = lh.div_ceil(4);
-    // The block indices below are `u32` math over the whole grid.
-    grid_bytes(bx, by, 16)?;
+    // Every block the loops below read, and a grid whose block index fits
+    // `u32`.
+    let img = img.get(..grid_bytes(bx, by, 16)?)?;
     if Some(out.len()) != grid_bytes(ndx, ndy, 16) {
         return None;
     }
@@ -144,10 +147,10 @@ pub(crate) fn transcode_bc6h(
                 }
             }
 
-            let dst_block_x = (src_block_x * 6) >> 2;
-            let dst_block_y = (src_block_y * 6) >> 2;
-            let inner_dst_x = 3.min(ndx - dst_block_x);
-            let inner_dst_y = 3.min(ndy - dst_block_y);
+            let dst_block_x = src_block_x.saturating_mul(6) >> 2;
+            let dst_block_y = src_block_y.saturating_mul(6) >> 2;
+            let inner_dst_x = ndx.saturating_sub(dst_block_x).min(3);
+            let inner_dst_y = ndy.saturating_sub(dst_block_y).min(3);
 
             for dy in 0..inner_dst_y {
                 for dx in 0..inner_dst_x {

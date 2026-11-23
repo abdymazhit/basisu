@@ -496,7 +496,9 @@ pub fn transcode_ldr(
             // Flush: emit the destination block rows covered by the buffer.
             let buffered_src_pixel_y = (src_by / n_buf_rows) * n_buf_rows * sbh;
             let num_buffered_rows = buf_row + 1;
-            let override_h = (orig_h - buffered_src_pixel_y).min(num_buffered_rows * sbh);
+            let override_h = orig_h
+                .saturating_sub(buffered_src_pixel_y)
+                .min(num_buffered_rows * sbh);
             let total_dst_rows = (num_buffered_rows * sbh + 3) >> 2;
             for dst_ofs_by in 0..total_dst_rows {
                 let dst_by = (buffered_src_pixel_y >> 2) + dst_ofs_by;

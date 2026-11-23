@@ -594,6 +594,78 @@ fn etc1s_global_data_is_checked_like_the_reference() {
         .is_err());
 }
 
+/// Byte offsets the `.basis` tests patch: the header's data size (u32) and,
+/// within a 23-byte slice desc, the original width and height and the block
+/// counts (u16 each) and the slice's byte length (u32).
+const BASIS_DATA_SIZE: usize = 8;
+const BASIS_SLICE_DESC_OFS: usize = 65;
+const SLICE_ORIG_WIDTH: usize = 5;
+const SLICE_ORIG_HEIGHT: usize = 7;
+const SLICE_NUM_BLOCKS_X: usize = 9;
+const SLICE_NUM_BLOCKS_Y: usize = 11;
+const SLICE_FILE_SIZE: usize = 17;
+
+/// A copy of the `.basis` `file` with the u16 or u32 (`width` bytes) at byte
+/// `at` of its first slice desc set to `value`.
+fn with_slice0(file: &[u8], at: usize, width: usize, value: u32) -> Vec<u8> {
+    let desc = BASIS_SLICE_DESC_OFS;
+    let desc = u32::from_le_bytes(file[desc..desc + 4].try_into().unwrap()) as usize;
+    let mut data = file.to_vec();
+    data[desc + at..desc + at + width].copy_from_slice(&value.to_le_bytes()[..width]);
+    data
+}
+
+/// The header's data size is a u32 added to the header size: on a 32-bit
+/// `usize` (wasm32) `77 + u32::MAX` overflowed. Refused on every target;
+/// `tests/wasm.rs` runs it under wasm32.
+#[test]
+fn a_basis_data_size_past_the_file_is_refused() {
+    let data = with_u32(BASIS_ETC1S, BASIS_DATA_SIZE, u32::MAX);
+    assert!(matches!(Transcoder::new(&data), Err(Error::InvalidData)));
+}
+
+/// A `.basis` slice records its block counts and byte length apart from its
+/// pixel size, and the codecs index the output by both. A grid wider or
+/// taller than the pixel size implies wrote past the FXT1 grid, subtracted
+/// past zero in the UASTC HDR, ASTC HDR 6x6 and raw-ASTC reblocking clamps,
+/// and read past the decoded 6x6 blocks; a grid with no blocks divided by
+/// zero; a byte length shorter than the grid read past the slice. Each was
+/// a panic (most of them in release too). Each now fails the transcode.
+#[test]
+fn basis_slices_that_disagree_with_their_size_fail_the_transcode() {
+    let uastc_hdr = include_bytes!("../../corpus/smoke/uastc_hdr.basis");
+    let hdr_6x6i = include_bytes!("../../corpus/smoke/uastc_hdr_6x6i.basis");
+    let xuastc = include_bytes!("../../corpus/smoke/xuastc_5x4.basis");
+    let cases: [(&[u8], usize, usize, u32, TargetFormat); 9] = [
+        (BASIS_ETC1S, SLICE_ORIG_WIDTH, 2, 1, TargetFormat::Fxt1Rgb),
+        (BASIS_ETC1S, SLICE_ORIG_HEIGHT, 2, 6, TargetFormat::Fxt1Rgb),
+        (BASIS_UASTC, SLICE_NUM_BLOCKS_X, 2, 0, TargetFormat::Rgba32),
+        (BASIS_UASTC, SLICE_FILE_SIZE, 4, 12, TargetFormat::Bc1Rgb),
+        (
+            BASIS_UASTC,
+            SLICE_FILE_SIZE,
+            4,
+            0x8000,
+            TargetFormat::Bc7Rgba,
+        ),
+        (uastc_hdr, SLICE_ORIG_WIDTH, 2, 4, TargetFormat::RgbaHalf),
+        (hdr_6x6i, SLICE_NUM_BLOCKS_X, 2, 0x7f, TargetFormat::Bc6h),
+        (hdr_6x6i, SLICE_NUM_BLOCKS_Y, 2, 1000, TargetFormat::Bc6h),
+        (xuastc, SLICE_ORIG_HEIGHT, 2, 0, TargetFormat::Rgba32),
+    ];
+    for (file, at, width, value, target) in cases {
+        let data = with_slice0(file, at, width, value);
+        let t = Transcoder::new(&data).unwrap();
+        if !t.supports(target) {
+            continue;
+        }
+        assert!(
+            t.transcode(0, target, DecodeFlags::NONE).is_err(),
+            "slice field {at} = {value:#x}, {target:?}"
+        );
+    }
+}
+
 /// Both Basis Universal containers open through the same `Transcoder::new`,
 /// with codec, alpha, and dimension metadata intact.
 #[test]
