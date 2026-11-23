@@ -594,6 +594,98 @@ fn etc1s_global_data_is_checked_like_the_reference() {
         .is_err());
 }
 
+/// Header fields the DFD and key/value data tests patch: `dfdByteOffset`,
+/// `kvdByteOffset` and `kvdByteLength` (u32 each).
+const KTX2_DFD_BYTE_OFFSET: usize = 48;
+const KTX2_KVD_BYTE_OFFSET: usize = 56;
+const KTX2_KVD_BYTE_LENGTH: usize = 60;
+
+/// The little-endian u32 at byte `at` of `file`.
+fn read_u32(file: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(file[at..at + 4].try_into().unwrap())
+}
+
+/// A copy of `file` that declares no key/value data (offset and length 0),
+/// so no rule that involves it applies.
+fn without_kvd(file: &[u8]) -> Vec<u8> {
+    let data = with_u32(file, KTX2_KVD_BYTE_OFFSET, 0);
+    with_u32(&data, KTX2_KVD_BYTE_LENGTH, 0)
+}
+
+/// Every case is refused at open with `InvalidData`; a failure names each
+/// case that is not, not just the first.
+fn assert_refused(cases: &[(&str, Vec<u8>)]) {
+    let opened: Vec<&str> = cases
+        .iter()
+        .filter(|(_, data)| !matches!(Transcoder::new(data), Err(Error::InvalidData)))
+        .map(|&(name, _)| name)
+        .collect();
+    assert!(opened.is_empty(), "not refused: {opened:?}");
+}
+
+/// `ktx2_transcoder::init` refuses a DFD that starts inside the 80-byte
+/// header or ends past the file. The port read only the 32 bytes it uses,
+/// wherever they were.
+#[test]
+fn a_dfd_inside_the_header_or_past_the_file_is_refused() {
+    let dfd = read_u32(UASTC, KTX2_DFD_BYTE_OFFSET) as usize;
+    let base = without_kvd(UASTC);
+    assert!(Transcoder::new(&base).is_ok());
+
+    // At 52 the DFD's first word is the header's own `dfdByteLength` (44),
+    // and its words 3 to 6 (color model, block size, plane bytes) are the
+    // global data offset and length, which a file with no supercompression
+    // never reads: they get the real DFD's words.
+    let mut in_header = with_u32(&base, KTX2_DFD_BYTE_OFFSET, 52);
+    in_header[64..80].copy_from_slice(&UASTC[dfd + 12..dfd + 28]);
+
+    // The DFD copied to the end of the file: whole, it opens; 4 bytes short,
+    // it is refused.
+    let at_end = |len: usize| {
+        let mut data = with_u32(&base, KTX2_DFD_BYTE_OFFSET, UASTC.len() as u32);
+        data.extend_from_slice(&UASTC[dfd..dfd + len]);
+        data
+    };
+    assert!(Transcoder::new(&at_end(44)).is_ok());
+    assert_refused(&[
+        ("inside the header", in_header),
+        ("past the file", at_end(40)),
+    ]);
+}
+
+/// KTX2 3.10.3: the DFD's first word, `dfdTotalSize`, repeats
+/// `dfdByteLength`, and key/value data starts where the DFD ends
+/// (`kvdByteOffset - dfdByteOffset == dfdTotalSize`). `ktx2_transcoder::init`
+/// refuses a file where either disagrees; the port read neither.
+#[test]
+fn a_dfd_whose_size_disagrees_is_refused() {
+    let dfd = read_u32(UASTC, KTX2_DFD_BYTE_OFFSET) as usize;
+    let kvd = read_u32(UASTC, KTX2_KVD_BYTE_OFFSET) as usize;
+    let kvd_end = kvd + read_u32(UASTC, KTX2_KVD_BYTE_LENGTH) as usize;
+    assert_eq!(kvd, dfd + 44);
+    // Entry padding counts from the start of the file, so the copies below
+    // need a 4-aligned end of file.
+    let end = UASTC.len() as u32;
+    assert_eq!(end % 4, 0);
+
+    // The key/value data copied to the end of the file opens when the DFD
+    // moves with it, and is refused when it no longer follows the DFD.
+    let both_moved = with_u32(UASTC, KTX2_DFD_BYTE_OFFSET, end);
+    let mut both_moved = with_u32(&both_moved, KTX2_KVD_BYTE_OFFSET, end + 44);
+    both_moved.extend_from_slice(&UASTC[dfd..kvd_end]);
+    assert!(Transcoder::new(&both_moved).is_ok());
+    let mut kvd_moved = with_u32(UASTC, KTX2_KVD_BYTE_OFFSET, end);
+    kvd_moved.extend_from_slice(&UASTC[kvd..kvd_end]);
+
+    // Without key/value data only `dfdTotalSize` is checked.
+    let base = without_kvd(UASTC);
+    assert_refused(&[
+        ("total size 60", with_u32(&base, dfd, 60)),
+        ("total size 0", with_u32(&base, dfd, 0)),
+        ("key/value data apart from the DFD", kvd_moved),
+    ]);
+}
+
 /// Byte offsets the `.basis` tests patch: the header's data size (u32) and,
 /// within a 23-byte slice desc, the original width and height and the block
 /// counts (u16 each) and the slice's byte length (u32).

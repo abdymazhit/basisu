@@ -201,7 +201,9 @@ impl Ktx2Header {
     /// Parse a KTX2 file. Returns `None` if it is not a Basis Universal KTX2
     /// this crate transcodes (bad magic, an unsupported vkFormat or color
     /// model, or a texture shape this crate rejects: 1D/3D, DEFLATE
-    /// supercompression, bad face/level counts).
+    /// supercompression, bad face/level counts), or if its layout is one
+    /// `ktx2_transcoder::init` refuses: a block inside the header or past the
+    /// end of the file, or a DFD whose sizes disagree.
     pub fn parse(data: &[u8]) -> Option<Ktx2Header> {
         if data.len() < KTX2_HEADER_SIZE || data[..12] != KTX2_MAGIC {
             return None;
@@ -258,8 +260,8 @@ impl Ktx2Header {
         {
             return None;
         }
-        let dfd_byte_offset = rd32(data, 48) as usize;
-        let dfd_byte_length = rd32(data, 52) as usize;
+        let dfd_byte_offset = rd32(data, 48);
+        let dfd_byte_length = rd32(data, 52);
         let kvd_byte_offset = rd32(data, 56);
         let kvd_byte_length = rd32(data, 60);
         let sgd_byte_offset = rd64(data, 64);
@@ -312,25 +314,36 @@ impl Ktx2Header {
             levels.push(l);
         }
 
-        // Data Format Descriptor: color model + transfer function at word 3,
-        // texel block dimensions at word 4, sample 0 at word 7. Only the two
-        // DFD sizes the encoder writes are accepted.
+        // Data Format Descriptor: only the two sizes the encoder writes, past
+        // the header and wholly inside the file (its end a checked sum). Its
+        // first word, `dfdTotalSize`, must repeat that size, and key/value
+        // data, when there is any, must start where it ends (KTX2 3.10.3).
+        // The key/value test is the reference's u32 difference: with the DFD
+        // inside the file it holds only for the offset right after it.
         if dfd_byte_length != 44 && dfd_byte_length != 60 {
             return None;
         }
-        if dfd_byte_offset
-            .checked_add(32)
-            .is_none_or(|end| end > data.len())
+        let dfd_start = dfd_byte_offset as usize;
+        if dfd_start < KTX2_HEADER_SIZE {
+            return None;
+        }
+        let dfd = data.get(dfd_start..dfd_start.checked_add(dfd_byte_length as usize)?)?;
+        let dfd_total_size = rd32(dfd, 0);
+        if dfd_total_size != dfd_byte_length
+            || (kvd_byte_length != 0
+                && kvd_byte_offset.wrapping_sub(dfd_byte_offset) != dfd_total_size)
         {
             return None;
         }
-        let dfd_bits = rd32(data, dfd_byte_offset + 12);
+        // Color model + transfer function at word 3, texel block dimensions
+        // at word 4, sample 0 at word 7.
+        let dfd_bits = rd32(dfd, 12);
         let color_model = dfd_bits & 255;
         let transfer_func = (dfd_bits >> 16) & 255;
-        let texel_block_dimensions = rd32(data, dfd_byte_offset + 16);
+        let texel_block_dimensions = rd32(dfd, 16);
         let dfd_block_width = (texel_block_dimensions & 0xFF) + 1;
         let dfd_block_height = ((texel_block_dimensions >> 8) & 0xFF) + 1;
-        let sample_channel0 = rd32(data, dfd_byte_offset + 28);
+        let sample_channel0 = rd32(dfd, 28);
 
         // KTX2 3.10.1 restrictions: only linear and sRGB transfer functions.
         if transfer_func != KTX2_KHR_DF_TRANSFER_LINEAR
