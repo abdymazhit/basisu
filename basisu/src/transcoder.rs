@@ -260,11 +260,10 @@ impl<'a> Ktx2Transcoder<'a> {
     }
 
     /// The `len` bytes at `ofs` within mip `level`'s data (an image's slice).
-    /// `None` if the range leaves the file, or if the level's u64 file offset
-    /// does not fit `usize` or the sum overflows.
+    /// `None` if the range leaves the file or a sum overflows.
     fn level_bytes(&self, level: u32, ofs: u32, len: u32) -> Option<&[u8]> {
-        let level_ofs = self.header.levels.get(level as usize)?.byte_offset;
-        let start = usize::try_from(level_ofs).ok()?.checked_add(ofs as usize)?;
+        let level_start = self.header.levels.get(level as usize)?.byte_range()?.start;
+        let start = level_start.checked_add(ofs as usize)?;
         self.data.get(start..start.checked_add(len as usize)?)
     }
 
@@ -432,11 +431,8 @@ impl<'a> Ktx2Transcoder<'a> {
         out: &mut [u8],
     ) -> Option<()> {
         let l = self.header.levels.get(level as usize)?;
-        // The level index holds u64 file offsets: they must fit `usize`
-        // (wasm32), and the level's end must not wrap.
-        let start = usize::try_from(l.byte_offset).ok()?;
-        let end = start.checked_add(usize::try_from(l.byte_length).ok()?)?;
-        let comp = self.data.get(start..end)?;
+        // Inside the file, as the header parse checked.
+        let comp = self.data.get(l.byte_range()?)?;
         // One image is the level's block grid in the source's own block size,
         // 16 bytes a block; the level holds max(layers, 1) * faces of them
         // back to back.

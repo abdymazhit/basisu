@@ -103,9 +103,11 @@ fn uastc_high_quality_bc7_under_wasm() {
     assert_eq!(hq.len(), t.output_size(0, TargetFormat::Bc7Rgba).unwrap());
 }
 
-/// KTX2 header fields the offset test patches: `layerCount` (u32),
-/// `sgdByteOffset` (u64), and level 0's `byteOffset` (u64).
+/// KTX2 header fields the offset test patches: `layerCount` and
+/// `kvdByteLength` (u32 each), `sgdByteOffset` (u64), and level 0's
+/// `byteOffset` (u64).
 const KTX2_LAYER_COUNT: usize = 32;
+const KTX2_KVD_BYTE_LENGTH: usize = 60;
 const KTX2_SGD_BYTE_OFFSET: usize = 64;
 const KTX2_LEVEL0_BYTE_OFFSET: usize = 80;
 
@@ -131,28 +133,28 @@ fn with_u32(file: &[u8], at: usize, value: u32) -> Vec<u8> {
 /// `usize` is 32 bits here. A u64 file offset past 4 GiB is refused rather
 /// than cut to its low bits (which read the codebooks or a level from the
 /// wrong place without an error), and a sum of an in-file offset and a u32
-/// length or count cannot wrap: each of these used to panic or misread. The
+/// length or count (the key/value block's end among them) cannot wrap: each
+/// of these used to panic, misread, or open. All are refused at open. The
 /// host runs the same cases in `tests/api.rs`.
 #[wasm_bindgen_test]
 fn offsets_and_sums_past_4_gib_are_refused_under_wasm() {
     let sgd = read_u64(ETC1S, KTX2_SGD_BYTE_OFFSET);
+    let level_past_4_gib = |file: &[u8]| {
+        let level0 = read_u64(file, KTX2_LEVEL0_BYTE_OFFSET);
+        with_u64(file, KTX2_LEVEL0_BYTE_OFFSET, level0 + (1 << 32))
+    };
     let refused = [
         FUZZ_SGD_OFFSET_MAX.to_vec(),
         with_u64(ETC1S, KTX2_SGD_BYTE_OFFSET, u64::MAX),
         with_u64(ETC1S, KTX2_SGD_BYTE_OFFSET, sgd + (1 << 32)),
         with_u32(ETC1S, sgd as usize + 4, u32::MAX),
         with_u32(ETC1S, KTX2_LAYER_COUNT, u32::MAX),
+        level_past_4_gib(ETC1S),
+        level_past_4_gib(UASTC),
+        with_u32(UASTC, KTX2_KVD_BYTE_LENGTH, u32::MAX),
     ];
     for data in refused {
         assert!(Transcoder::new(&data).is_err());
-    }
-    for file in [ETC1S, UASTC] {
-        let level0 = read_u64(file, KTX2_LEVEL0_BYTE_OFFSET);
-        let data = with_u64(file, KTX2_LEVEL0_BYTE_OFFSET, level0 + (1 << 32));
-        let t = Transcoder::new(&data).unwrap();
-        assert!(t
-            .transcode(0, TargetFormat::Rgba32, DecodeFlags::NONE)
-            .is_err());
     }
 }
 
@@ -189,13 +191,16 @@ fn an_output_size_past_usize_is_refused_under_wasm() {
 
 /// A zstd level's `uncompressedByteLength` sized the inflate buffer as is:
 /// here a length just under 4 GiB fits `usize`, and the buffer it asked for
-/// cannot exist. It must equal the size the level's dimensions imply, so the
-/// level is refused before anything is allocated. The host runs this in
-/// `tests/api.rs`.
+/// cannot exist. From 2 GiB up the file is refused at open, as the reference
+/// refuses it; below that the length must equal the size the level's
+/// dimensions imply, so the level is refused before anything is allocated.
+/// The host runs this in `tests/api.rs`.
 #[wasm_bindgen_test]
 fn a_zstd_length_past_the_level_size_is_refused_under_wasm() {
     let ulen = KTX2_LEVEL0_BYTE_OFFSET + 16;
     let data = with_u64(UASTC_HDR_ZSTD, ulen, u64::from(u32::MAX) - 15);
+    assert!(Transcoder::new(&data).is_err());
+    let data = with_u64(UASTC_HDR_ZSTD, ulen, (1 << 31) - 1);
     let t = Transcoder::new(&data).unwrap();
     assert!(t
         .transcode(0, TargetFormat::RgbaHalf, DecodeFlags::NONE)
