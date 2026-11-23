@@ -604,10 +604,7 @@ impl<'a> BasisTranscoder<'a> {
             #[cfg(feature = "hdr")]
             BasisSourceFormat::UastcHdr6x6 => {
                 let stream = self.uastc_slice(image, level)?;
-                let (blocks, dec_w, dec_h) = crate::uastc_hdr_6x6::decode_6x6_hdr(stream)?;
-                if dec_w != lw || dec_h != lh {
-                    return None;
-                }
+                let blocks = crate::uastc_hdr_6x6::decode_6x6_hdr_sized(stream, lw, lh)?;
                 dispatch::transcode_astc_hdr_6x6(&blocks, bx, by, lw, lh, fmt, flags, out)
             }
             // The slice is one XUASTC stream; the transcode layer validates

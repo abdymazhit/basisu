@@ -396,6 +396,20 @@ fn build_decomp_block(
 /// coded pixel dimensions; `None` on a bad signature or dimensions, a
 /// malformed stream, or a missing 0xA742 end marker.
 pub fn decode_6x6_hdr(comp: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+    decode_6x6_hdr_inner(comp, None)
+}
+
+/// [`decode_6x6_hdr`] for a stream the container says is `width` x
+/// `height`: a stream header that codes any other size is refused before
+/// the block buffer is allocated, which the header's size (up to 32768 x
+/// 32768, half a gigabyte of blocks) would otherwise drive.
+pub fn decode_6x6_hdr_sized(comp: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+    decode_6x6_hdr_inner(comp, Some((width, height))).map(|(blocks, _, _)| blocks)
+}
+
+/// The decoder behind both entry points; `expect` is the size the stream
+/// header must code, if the caller knows it.
+fn decode_6x6_hdr_inner(comp: &[u8], expect: Option<(u32, u32)>) -> Option<(Vec<u8>, u32, u32)> {
     if comp.len() <= 2 * 3 + 1 {
         return None;
     }
@@ -411,6 +425,9 @@ pub fn decode_6x6_hdr(comp: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     let width = decoder.get_bits(16);
     let height = decoder.get_bits(16);
     if width == 0 || height == 0 || width > MAX_ASTC_HDR_6X6_DIM || height > MAX_ASTC_HDR_6X6_DIM {
+        return None;
+    }
+    if expect.is_some_and(|dims| dims != (width, height)) {
         return None;
     }
 

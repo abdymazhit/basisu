@@ -400,12 +400,9 @@ impl<'a> Ktx2Transcoder<'a> {
                 let image = self.image_index(level, layer, face)?;
                 let &(ofs, len) = self.slice_descs.get(image)?;
                 let stream = self.level_bytes(level, ofs, len)?;
-                let (blocks, dec_w, dec_h) = crate::uastc_hdr_6x6::decode_6x6_hdr(stream)?;
-                // The decoded dimensions must match the level's, or the stream
-                // is inconsistent with the container.
-                if dec_w != lw || dec_h != lh {
-                    return None;
-                }
+                // The stream must code the level's dimensions, or it is
+                // inconsistent with the container (checked before decoding).
+                let blocks = crate::uastc_hdr_6x6::decode_6x6_hdr_sized(stream, lw, lh)?;
                 dispatch::transcode_astc_hdr_6x6(&blocks, bx, by, lw, lh, fmt, flags, out)
             }
             #[cfg(not(feature = "hdr"))]
