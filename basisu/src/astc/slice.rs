@@ -7,6 +7,7 @@
 
 use super::decode::{decode_block_ldr8, MAX_BLOCK_TEXELS};
 use super::unpack::unpack_block;
+use crate::dispatch::{grid_bytes, grid_len};
 use crate::fastenc::etc1f::PackEtc1State;
 use alloc::vec::Vec;
 
@@ -217,8 +218,8 @@ fn emit_4x4(
     }
 
     let bpp = fmt.bytes_per();
-    let max_x = 4.min(pitch as i32 - block_x as i32 * 4).max(0) as u32;
-    let max_y = 4.min(rows as i32 - block_y as i32 * 4).max(0) as u32;
+    let max_x = pitch.saturating_sub(block_x.saturating_mul(4)).min(4);
+    let max_y = rows.saturating_sub(block_y.saturating_mul(4)).min(4);
     for y in 0..max_y {
         for x in 0..max_x {
             let c = pixels[(y * 4 + x) as usize];
@@ -304,10 +305,14 @@ fn deblock_filter(img: &[Rgba], w: u32, h: u32, fbw: u32, fbh: u32, stronger: bo
     } else {
         DEBLOCK_SKIP_THRESH
     };
+    // Coordinates are signed (a neighbour offset can go negative) and the
+    // caller keeps both dimensions within `i32`; offsets are taken in `usize`,
+    // since `w * h` can still pass `i32::MAX`.
+    let ofs = |x: i32, y: i32| y as usize * w as usize + x as usize;
     let at = |buf: &[Rgba], x: i32, y: i32| -> Rgba {
         let cx = x.clamp(0, w as i32 - 1);
         let cy = y.clamp(0, h as i32 - 1);
-        buf[(cx + cy * w as i32) as usize]
+        buf[ofs(cx, cy)]
     };
     let mut temp: Vec<Rgba> = img.to_vec();
     // Horizontal pass over every source-block boundary column.
@@ -332,8 +337,8 @@ fn deblock_filter(img: &[Rgba], w: u32, h: u32, fbw: u32, fbh: u32, stronger: bo
                         mr[c] = ((5 * rc + 2 * lc + rrc + 4) / 8) as u8;
                     }
                 }
-                temp[((x - 1) + y * w as i32) as usize] = ml;
-                temp[(x + y * w as i32) as usize] = mr;
+                temp[ofs(x - 1, y)] = ml;
+                temp[ofs(x, y)] = mr;
             }
             x += fbw as i32;
         }
@@ -363,8 +368,8 @@ fn deblock_filter(img: &[Rgba], w: u32, h: u32, fbw: u32, fbh: u32, stronger: bo
                         md[c] = ((5 * dc + 2 * uc + ddc + 4) / 8) as u8;
                     }
                 }
-                dst[(x + (y - 1) * w as i32) as usize] = mu;
-                dst[(x + y * w as i32) as usize] = md;
+                dst[ofs(x, y - 1)] = mu;
+                dst[ofs(x, y)] = md;
             }
             y += fbh as i32;
         }
@@ -394,10 +399,13 @@ pub fn transcode_ldr(
     has_alpha: bool,
     out: &mut [u8],
 ) -> Option<()> {
-    let total = (bx as usize).checked_mul(by as usize)?.checked_mul(16)?;
+    let total = grid_bytes(bx, by, 16)?;
     if img.len() < total {
         return None;
     }
+    // The padded image the source blocks cover.
+    let img_w = bx.checked_mul(sbw)?;
+    let img_h = by.checked_mul(sbh)?;
     let is_pvrtc1 = matches!(fmt, Target4x4::Pvrtc1Rgb | Target4x4::Pvrtc1Rgba);
     // PVRTC1 requires power-of-two texture dimensions (checked on the
     // original dimensions, before any block padding).
@@ -422,13 +430,9 @@ pub fn transcode_ldr(
     // and rows = orig_height; block targets use the destination block count
     // per row.
     let (pitch, rows, out_len) = if fmt.is_uncompressed() {
-        (
-            orig_w,
-            orig_h,
-            (orig_w as usize) * (orig_h as usize) * fmt.bytes_per(),
-        )
+        (orig_w, orig_h, grid_bytes(orig_w, orig_h, fmt.bytes_per())?)
     } else {
-        (dst_nx, 0, (dst_nx * dst_ny) as usize * fmt.bytes_per())
+        (dst_nx, 0, grid_bytes(dst_nx, dst_ny, fmt.bytes_per())?)
     };
     if out.len() != out_len {
         return None;
@@ -468,9 +472,9 @@ pub fn transcode_ldr(
         while (n_buf_rows * sbh) & 3 != 0 {
             n_buf_rows += 1;
         }
-        let buf_w = bx * sbw;
+        let buf_w = img_w;
         let buf_h = n_buf_rows * sbh;
-        let mut buffered = vec![[0u8; 4]; (buf_w * buf_h) as usize];
+        let mut buffered = vec![[0u8; 4]; grid_len(buf_w, buf_h)?];
 
         for src_by in 0..by {
             let buf_row = src_by % n_buf_rows;
@@ -492,7 +496,9 @@ pub fn transcode_ldr(
             // Flush: emit the destination block rows covered by the buffer.
             let buffered_src_pixel_y = (src_by / n_buf_rows) * n_buf_rows * sbh;
             let num_buffered_rows = buf_row + 1;
-            let override_h = (orig_h - buffered_src_pixel_y).min(num_buffered_rows * sbh);
+            let override_h = orig_h
+                .saturating_sub(buffered_src_pixel_y)
+                .min(num_buffered_rows * sbh);
             let total_dst_rows = (num_buffered_rows * sbh + 3) >> 2;
             for dst_ofs_by in 0..total_dst_rows {
                 let dst_by = (buffered_src_pixel_y >> 2) + dst_ofs_by;
@@ -528,9 +534,7 @@ pub fn transcode_ldr(
 
     // Whole-image path: decode the entire padded image, deblock it, then emit
     // destination 4x4 blocks with plain edge clamping.
-    let img_w = bx * sbw;
-    let img_h = by * sbh;
-    let mut temp = vec![[0u8; 4]; (img_w * img_h) as usize];
+    let mut temp = vec![[0u8; 4]; grid_len(img_w, img_h)?];
     for src_by in 0..by {
         for src_bx in 0..bx {
             let b = ((src_bx + src_by * bx) as usize) * 16;
@@ -543,6 +547,10 @@ pub fn transcode_ldr(
         }
     }
     let filtered = if deblock {
+        // The filter walks the image with signed 32-bit coordinates.
+        if i32::try_from(img_w).is_err() || i32::try_from(img_h).is_err() {
+            return None;
+        }
         deblock_filter(&temp, img_w, img_h, sbw, sbh, stronger)
     } else {
         temp

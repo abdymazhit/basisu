@@ -141,26 +141,21 @@ fn zstd_channel(comp: &[u8]) -> Option<Vec<u8>> {
     let want = want as usize;
 
     // The frame may legitimately decode to fewer bytes than its declared
-    // content size, so the output is truncated to what actually decoded;
-    // decoding more than the declared size is an error.
+    // content size, so the output is what actually decoded; decoding more
+    // than the declared size is an error. The declared size is a header
+    // field, so the output grows with what the frame decodes rather than
+    // being allocated at that size up front.
     let mut dec = ruzstd::decoding::StreamingDecoder::new(comp).ok()?;
-    let mut out = vec![0u8; want];
-    let mut total = 0usize;
+    let mut out = Vec::new();
+    let mut chunk = [0u8; 16 * 1024];
     loop {
-        if total == want {
-            let mut extra = [0u8; 1];
-            if dec.read(&mut extra).ok()? != 0 {
-                return None; // dstSize_tooSmall
-            }
-            break;
-        }
-        match dec.read(&mut out[total..]) {
+        match dec.read(&mut chunk) {
             Ok(0) => break,
-            Ok(n) => total += n,
+            Ok(n) if n > want - out.len() => return None, // dstSize_tooSmall
+            Ok(n) => out.extend_from_slice(&chunk[..n]),
             Err(_) => return None,
         }
     }
-    out.truncate(total);
     Some(out)
 }
 

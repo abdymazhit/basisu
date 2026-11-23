@@ -5,8 +5,10 @@
 //! transcode a level.
 
 use crate::basislz::etc1s::{Etc1sTranscoder, VideoState, MAX_PREV_FRAME_LEVELS};
-use crate::dispatch;
-use crate::ktx2::{BasisFormat, Ktx2Header, KTX2_SS_UASTC_HDR_6X6I, KTX2_SS_XUASTC_LDR};
+use crate::dispatch::{self, grid_bytes};
+use crate::ktx2::{
+    BasisFormat, Ktx2Header, KTX2_SS_BASISLZ, KTX2_SS_UASTC_HDR_6X6I, KTX2_SS_XUASTC_LDR,
+};
 use alloc::vec::Vec;
 
 /// `KTX2_IMAGE_IS_P_FRAME`: an ETC1S image desc flag marking a predicted
@@ -53,9 +55,10 @@ pub struct Ktx2Transcoder<'a> {
 }
 
 /// Inflate a Zstandard-supercompressed KTX2 level to exactly `want` bytes
-/// (the level's `uncompressed_byte_length`). `None` if the stream is malformed
-/// or does not produce exactly `want` bytes; a size mismatch means a corrupt
-/// level. Decoding is pure Rust (`ruzstd`).
+/// (the level's size from its dimensions, which its `uncompressed_byte_length`
+/// must equal). `None` if the stream is malformed or does not produce exactly
+/// `want` bytes; a size mismatch means a corrupt level. Decoding is pure Rust
+/// (`ruzstd`).
 #[cfg(feature = "zstd")]
 fn zstd_inflate(comp: &[u8], want: usize) -> Option<Vec<u8>> {
     use ruzstd::io::Read;
@@ -118,7 +121,7 @@ impl<'a> Ktx2Transcoder<'a> {
             let desc_size = match (header.supercompression, header.format) {
                 (KTX2_SS_UASTC_HDR_6X6I, BasisFormat::UastcHdr6x6) => 12,
                 (KTX2_SS_XUASTC_LDR, BasisFormat::XuastcLdr(_)) => 12,
-                (1, _) => 8,
+                (KTX2_SS_BASISLZ, _) => 8,
                 _ => return None,
             };
             let image_count = image_count(&header)?;
@@ -142,52 +145,67 @@ impl<'a> Ktx2Transcoder<'a> {
             }
         }
 
-        if header.format == BasisFormat::Etc1s {
-            // BasisLZ global data header (20 bytes): endpoint/selector counts
-            // (u16 each), the endpoint/selector/table byte lengths (u32 each),
-            // and an extendedByteLength u32 this decoder never needs.
-            //
-            // The offset and the lengths below come from the file: the u64
-            // offset must fit `usize` (wasm32), and every sum is checked so
-            // none can wrap past a bounds check.
+        // ETC1S global data is decoded under BasisLZ only, as the reference's
+        // `start_transcoding` does: under any other scheme an ETC1S file
+        // opens with no codebooks, and every transcode of it fails.
+        if header.format == BasisFormat::Etc1s && header.supercompression == KTX2_SS_BASISLZ {
+            // The header parse placed the global data past the header and
+            // inside the file; each part below is read from that range alone,
+            // and must fit the length it declares (`ktx2_transcoder::
+            // decompress_etc1s_global_data`). Its offset and length are u64:
+            // they must fit `usize` (wasm32), and every sum is checked.
             let sgd = usize::try_from(header.sgd_byte_offset).ok()?;
-            if sgd.checked_add(20).is_none_or(|end| end > data.len()) {
+            let sgd_len = usize::try_from(header.sgd_byte_length).ok()?;
+            let gd = data.get(sgd..sgd.checked_add(sgd_len)?)?;
+
+            // BasisLZ global data header (20 bytes): endpoint/selector counts
+            // (u16 each), then the endpoint, selector, table and extended
+            // byte lengths (u32 each). The extended data is never read, but
+            // it is part of the declared layout.
+            if gd.len() < 20 {
                 return None;
             }
-            let num_e = rd16(data, sgd);
-            let num_s = rd16(data, sgd + 2);
-            let e_len = rd32(data, sgd + 4) as usize;
-            let s_len = rd32(data, sgd + 8) as usize;
-            let t_len = rd32(data, sgd + 12) as usize;
+            let num_e = rd16(gd, 0);
+            let num_s = rd16(gd, 2);
+            let e_len = rd32(gd, 4) as usize;
+            let s_len = rd32(gd, 8) as usize;
+            let t_len = rd32(gd, 12) as usize;
+            let x_len = rd32(gd, 16) as usize;
+            if e_len == 0 || s_len == 0 || t_len == 0 || num_e == 0 || num_s == 0 {
+                return None;
+            }
 
+            // The header, one 20-byte desc per image, the three payloads and
+            // the extended data, in that order, within the declared length.
             let image_count = image_count(&header)?;
-            let descs_end = image_count.checked_mul(20)?.checked_add(sgd + 20)?;
-            if descs_end > data.len() {
-                return None;
-            }
-            for i in 0..image_count {
-                let o = sgd + 20 + 20 * i;
-                image_descs.push(Etc1sImageDesc {
-                    image_flags: rd32(data, o),
-                    rgb_ofs: rd32(data, o + 4),
-                    rgb_len: rd32(data, o + 8),
-                    alpha_ofs: rd32(data, o + 12),
-                    alpha_len: rd32(data, o + 16),
-                });
-            }
-
-            // The payloads follow the image descs in a fixed order: endpoint
-            // codebook, selector codebook, Huffman tables.
+            let descs_end = image_count.checked_mul(20)?.checked_add(20)?;
             let e_ofs = descs_end;
             let s_ofs = e_ofs.checked_add(e_len)?;
             let t_ofs = s_ofs.checked_add(s_len)?;
             let t_end = t_ofs.checked_add(t_len)?;
-            if t_end > data.len() {
+            if t_end.checked_add(x_len)? > gd.len() {
                 return None;
             }
+            for i in 0..image_count {
+                let o = 20 + 20 * i;
+                let desc = Etc1sImageDesc {
+                    image_flags: rd32(gd, o),
+                    rgb_ofs: rd32(gd, o + 4),
+                    rgb_len: rd32(gd, o + 8),
+                    alpha_ofs: rd32(gd, o + 12),
+                    alpha_len: rd32(gd, o + 16),
+                };
+                // Every image has a color slice, and an alpha slice too when
+                // the file carries alpha.
+                if desc.rgb_len == 0 || (header.has_alpha && desc.alpha_len == 0) {
+                    return None;
+                }
+                image_descs.push(desc);
+            }
+
             let mut t = Etc1sTranscoder::new();
-            if !t.decode_palettes(num_e, &data[e_ofs..s_ofs], num_s, &data[s_ofs..t_ofs])
-                || !t.decode_tables(&data[t_ofs..t_end])
+            if !t.decode_palettes(num_e, &gd[e_ofs..s_ofs], num_s, &gd[s_ofs..t_ofs])
+                || !t.decode_tables(&gd[t_ofs..t_end])
             {
                 return None;
             }
@@ -226,8 +244,7 @@ impl<'a> Ktx2Transcoder<'a> {
     /// `(num_blocks_x, num_blocks_y)` for a mip level, in the source format's
     /// own block size (4x4 for ETC1S/UASTC, the footprint for raw ASTC).
     fn level_blocks(&self, level: u32) -> (u32, u32) {
-        let lw = (self.header.width >> level).max(1);
-        let lh = (self.header.height >> level).max(1);
+        let (lw, lh) = self.header.level_dims(level);
         let (bw, bh) = self.header.format.block_dims();
         (lw.div_ceil(bw), lh.div_ceil(bh))
     }
@@ -332,9 +349,13 @@ impl<'a> Ktx2Transcoder<'a> {
         video: Option<&mut VideoState>,
         out: &mut [u8],
     ) -> Option<()> {
+        // A level past the level index fails before anything is derived from
+        // it, as in the reference transcoder.
+        if level as usize >= self.header.levels.len() {
+            return None;
+        }
         let (bx, by) = self.level_blocks(level);
-        let lw = (self.header.width >> level).max(1);
-        let lh = (self.header.height >> level).max(1);
+        let (lw, lh) = self.header.level_dims(level);
         match self.header.format {
             BasisFormat::Etc1s => {
                 let t = self.etc1s.as_ref()?;
@@ -379,12 +400,9 @@ impl<'a> Ktx2Transcoder<'a> {
                 let image = self.image_index(level, layer, face)?;
                 let &(ofs, len) = self.slice_descs.get(image)?;
                 let stream = self.level_bytes(level, ofs, len)?;
-                let (blocks, dec_w, dec_h) = crate::uastc_hdr_6x6::decode_6x6_hdr(stream)?;
-                // The decoded dimensions must match the level's, or the stream
-                // is inconsistent with the container.
-                if dec_w != lw || dec_h != lh {
-                    return None;
-                }
+                // The stream must code the level's dimensions, or it is
+                // inconsistent with the container (checked before decoding).
+                let blocks = crate::uastc_hdr_6x6::decode_6x6_hdr_sized(stream, lw, lh)?;
                 dispatch::transcode_astc_hdr_6x6(&blocks, bx, by, lw, lh, fmt, flags, out)
             }
             #[cfg(not(feature = "hdr"))]
@@ -419,15 +437,28 @@ impl<'a> Ktx2Transcoder<'a> {
         let start = usize::try_from(l.byte_offset).ok()?;
         let end = start.checked_add(usize::try_from(l.byte_length).ok()?)?;
         let comp = self.data.get(start..end)?;
-        // ss=2 (Zstandard): inflate the whole level to its uncompressed length
-        // before indexing the per-image data. ss=1 (BasisLZ) never reaches the
-        // raw-block path.
+        // One image is the level's block grid in the source's own block size,
+        // 16 bytes a block; the level holds max(layers, 1) * faces of them
+        // back to back.
+        let total_2d = grid_bytes(bx, by, 16)?;
+        let level_size = (self.header.layer_count.max(1) as usize)
+            .checked_mul(self.header.face_count.max(1) as usize)?
+            .checked_mul(total_2d)?;
+        // ss=2 (Zstandard): inflate the whole level before indexing the
+        // per-image data. ss=1 (BasisLZ) never reaches the raw-block path.
         let level_owned;
         let level_data: &[u8] = match self.header.supercompression {
             0 => comp,
             2 => {
-                let want = usize::try_from(l.uncompressed_byte_length).ok()?;
-                level_owned = zstd_inflate(comp, want)?;
+                // KTX2 defines a level's uncompressedByteLength as the size of
+                // its data, which for raw blocks is exactly the size the
+                // dimensions imply. A length that disagrees is refused before
+                // the inflate buffer is allocated, so the buffer is sized by
+                // the level's dimensions, never by the length field alone.
+                if l.uncompressed_byte_length != level_size as u64 {
+                    return None;
+                }
+                level_owned = zstd_inflate(comp, level_size)?;
                 &level_owned
             }
             _ => return None, // unknown supercompression scheme
@@ -441,7 +472,6 @@ impl<'a> Ktx2Transcoder<'a> {
         {
             return None;
         }
-        let total_2d = (bx as usize).checked_mul(by as usize)?.checked_mul(16)?;
         let img_ofs = (layer as usize)
             .checked_mul(self.header.face_count.max(1) as usize)?
             .checked_add(face as usize)?

@@ -17,6 +17,7 @@
 
 use super::etc1s::{Endpoint, Etc1sTranscoder, Selector};
 use super::etc1s_bc1::convert_etc1s_to_dxt1;
+use crate::dispatch::grid_len;
 use alloc::vec::Vec;
 
 /// Re-map a packed DXT1 selector byte (four 2-bit selectors) to FXT1 CC_MIXED
@@ -183,16 +184,18 @@ impl Etc1sTranscoder {
 
         let fxt1_blocks_x = orig_width.div_ceil(8);
         let fxt1_blocks_y = orig_height.div_ceil(4);
-        let mut blocks = vec![Fxt1Block::default(); (fxt1_blocks_x * fxt1_blocks_y) as usize];
+        let mut blocks = vec![Fxt1Block::default(); grid_len(fxt1_blocks_x, fxt1_blocks_y)?];
 
         for block_y in 0..num_blocks_y {
             for block_x in 0..num_blocks_x {
                 let (ei, si) = indices[(block_x + block_y * num_blocks_x) as usize];
                 let fxt1_block_x = block_x >> 1;
                 let fxt1_subblock = block_x & 1;
+                // Past the FXT1 grid only if the 4x4 grid is wider or taller
+                // than the pixel size implies.
                 let dst = (fxt1_block_x + block_y * fxt1_blocks_x) as usize;
                 convert_etc1s_to_fxt1(
-                    &mut blocks[dst],
+                    blocks.get_mut(dst)?,
                     &self.endpoints[ei as usize],
                     &self.selectors[si as usize],
                     fxt1_subblock,
@@ -204,8 +207,7 @@ impl Etc1sTranscoder {
         // count. Each FXT1 block lands at its ceil(w/8)-pitched
         // slot, so the FXT1 data is contiguous from offset 0 and the trailing
         // slots stay zero. The length and padding are part of the expected output.
-        let total_4x4 = (num_blocks_x * num_blocks_y) as usize;
-        if out.len() != total_4x4 * 16 {
+        if out.len() != indices.len() * 16 {
             return None;
         }
         out.fill(0);

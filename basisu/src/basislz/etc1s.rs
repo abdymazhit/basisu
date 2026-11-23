@@ -7,6 +7,7 @@ use super::amf::ApproxMoveToFront;
 use super::decoder::BitwiseDecoder;
 use super::huffman::HuffmanDecodingTable;
 use crate::color::Color32;
+use crate::dispatch::grid_bytes;
 use crate::etc::block::DecoderEtcBlock;
 use crate::etc::tables::SELECTOR_INDEX_TO_ETC1;
 use alloc::vec::Vec;
@@ -367,6 +368,10 @@ impl Etc1sTranscoder {
         num_blocks_y: u32,
         mut video: Option<&mut Vec<u32>>,
     ) -> Option<Vec<(u16, u16)>> {
+        // The block counts come from the file. Every emit sizes its output at
+        // up to 16 bytes per block, so that size must fit as well; past this
+        // check the count and every block index fit `u32`.
+        grid_bytes(num_blocks_x, num_blocks_y, 16)?;
         let total_blocks = num_blocks_x * num_blocks_y;
         if self.endpoints.is_empty() || self.selectors.is_empty() {
             return None;
@@ -622,7 +627,7 @@ impl Etc1sTranscoder {
         out: &mut [u8],
     ) -> Option<()> {
         let indices = self.decode_slice_indices(slice_data, num_blocks_x, num_blocks_y, video)?;
-        if out.len() != (width * height * 4) as usize {
+        if Some(out.len()) != grid_bytes(width, height, 4) {
             return None;
         }
         out.fill(0);
@@ -633,8 +638,8 @@ impl Etc1sTranscoder {
             let sel = &self.selectors[si as usize];
             let colors = DecoderEtcBlock::get_block_colors5(ep.color5, ep.inten5 as u32);
 
-            let max_x = (width as i32 - block_x as i32 * 4).clamp(0, 4) as u32;
-            let max_y = (height as i32 - block_y as i32 * 4).clamp(0, 4) as u32;
+            let max_x = width.saturating_sub(block_x.saturating_mul(4)).min(4);
+            let max_y = height.saturating_sub(block_y.saturating_mul(4)).min(4);
             for y in 0..max_y {
                 let s = sel.selectors[y as usize] as u32;
                 for x in 0..max_x {
@@ -686,8 +691,8 @@ impl Etc1sTranscoder {
             let ep = &self.endpoints[aei as usize];
             let sel = &self.selectors[asi as usize];
             let acolors = DecoderEtcBlock::get_block_colors5_g(ep.color5, ep.inten5 as u32);
-            let max_x = (width as i32 - block_x as i32 * 4).clamp(0, 4) as u32;
-            let max_y = (height as i32 - block_y as i32 * 4).clamp(0, 4) as u32;
+            let max_x = width.saturating_sub(block_x.saturating_mul(4)).min(4);
+            let max_y = height.saturating_sub(block_y.saturating_mul(4)).min(4);
             for y in 0..max_y {
                 let s = sel.selectors[y as usize] as u32;
                 for x in 0..max_x {
@@ -718,7 +723,7 @@ impl Etc1sTranscoder {
         out: &mut [u8],
     ) -> Option<()> {
         let indices = self.decode_slice_indices(slice_data, num_blocks_x, num_blocks_y, video)?;
-        if out.len() != (width * height * 2) as usize {
+        if Some(out.len()) != grid_bytes(width, height, 2) {
             return None;
         }
         out.fill(0);
@@ -742,8 +747,8 @@ impl Etc1sTranscoder {
                 };
             }
 
-            let max_x = (width as i32 - block_x as i32 * 4).clamp(0, 4) as u32;
-            let max_y = (height as i32 - block_y as i32 * 4).clamp(0, 4) as u32;
+            let max_x = width.saturating_sub(block_x.saturating_mul(4)).min(4);
+            let max_y = height.saturating_sub(block_y.saturating_mul(4)).min(4);
             for y in 0..max_y {
                 let s = sel.selectors[y as usize] as u32;
                 for x in 0..max_x {
@@ -772,7 +777,7 @@ impl Etc1sTranscoder {
         out: &mut [u8],
     ) -> Option<()> {
         let indices = self.decode_slice_indices(slice_data, num_blocks_x, num_blocks_y, video)?;
-        if out.len() != (width * height * 2) as usize {
+        if Some(out.len()) != grid_bytes(width, height, 2) {
             return None;
         }
         out.fill(0);
@@ -791,8 +796,8 @@ impl Etc1sTranscoder {
                     | 0xF) as u16;
             }
 
-            let max_x = (width as i32 - block_x as i32 * 4).clamp(0, 4) as u32;
-            let max_y = (height as i32 - block_y as i32 * 4).clamp(0, 4) as u32;
+            let max_x = width.saturating_sub(block_x.saturating_mul(4)).min(4);
+            let max_y = height.saturating_sub(block_y.saturating_mul(4)).min(4);
             for y in 0..max_y {
                 let s = sel.selectors[y as usize] as u32;
                 for x in 0..max_x {
@@ -827,7 +832,7 @@ impl Etc1sTranscoder {
             Some((c, a)) => (Some(c), Some(a)),
             None => (None, None),
         };
-        if out.len() != (width * height * 2) as usize {
+        if Some(out.len()) != grid_bytes(width, height, 2) {
             return None;
         }
         out.fill(0);
@@ -846,8 +851,8 @@ impl Etc1sTranscoder {
                 packed[i] = mul_8(c as u32, 15) as u16;
             }
 
-            let max_x = (width as i32 - block_x as i32 * 4).clamp(0, 4) as u32;
-            let max_y = (height as i32 - block_y as i32 * 4).clamp(0, 4) as u32;
+            let max_x = width.saturating_sub(block_x.saturating_mul(4)).min(4);
+            let max_y = height.saturating_sub(block_y.saturating_mul(4)).min(4);
             for y in 0..max_y {
                 let s = sel.selectors[y as usize] as u32;
                 for x in 0..max_x {
@@ -874,8 +879,8 @@ impl Etc1sTranscoder {
                     | (mul_8(c.b() as u32, 15) << 4)) as u16;
             }
 
-            let max_x = (width as i32 - block_x as i32 * 4).clamp(0, 4) as u32;
-            let max_y = (height as i32 - block_y as i32 * 4).clamp(0, 4) as u32;
+            let max_x = width.saturating_sub(block_x.saturating_mul(4)).min(4);
+            let max_y = height.saturating_sub(block_y.saturating_mul(4)).min(4);
             for y in 0..max_y {
                 let s = sel.selectors[y as usize] as u32;
                 for x in 0..max_x {

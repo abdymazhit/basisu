@@ -6,11 +6,14 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
+use basisu::transcoder::Ktx2Transcoder;
 use basisu::{DecodeFlags, Error, SourceFormat, TargetFormat, Transcoder};
 
 // KTX2 smoke fixtures, one per source codec.
 const ETC1S: &[u8] = include_bytes!("fixtures/etc1s.ktx2");
 const UASTC: &[u8] = include_bytes!("fixtures/uastc.ktx2");
+// A single-level 256x256 UASTC KTX2, the base the dimension tests build on.
+const UASTC_MEDIUM: &[u8] = include_bytes!("../../corpus/smoke/uastc_medium.ktx2");
 
 // `.basis` container smoke fixtures: an ETC1S file, an ETC1S+alpha file, and a
 // UASTC file. The same payloads `Transcoder::new` must auto-detect and open
@@ -329,6 +332,337 @@ fn offsets_and_sums_past_4_gib_are_refused() {
         assert!(t
             .transcode(0, TargetFormat::Rgba32, DecodeFlags::NONE)
             .is_err());
+    }
+}
+
+/// KTX2 header fields the dimension tests patch: `pixelWidth` and
+/// `pixelHeight` (u32 each).
+const KTX2_PIXEL_WIDTH: usize = 20;
+const KTX2_PIXEL_HEIGHT: usize = 24;
+
+/// A copy of `file` with its base dimensions set to `width` x `height`.
+fn with_dims(file: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let data = with_u32(file, KTX2_PIXEL_WIDTH, width);
+    with_u32(&data, KTX2_PIXEL_HEIGHT, height)
+}
+
+/// A single-level UASTC KTX2 of `width` x `height` texels on the header of
+/// `uastc_medium.ktx2`: its level holds that file's own (valid) blocks,
+/// repeated to cover the new block grid.
+fn uastc_ktx2(width: u32, height: u32) -> Vec<u8> {
+    let level0 = read_u64(UASTC_MEDIUM, KTX2_LEVEL0_BYTE_OFFSET) as usize;
+    let len = width.div_ceil(4) as usize * height.div_ceil(4) as usize * 16;
+    let mut data = with_dims(&UASTC_MEDIUM[..level0], width, height);
+    data.extend(UASTC_MEDIUM[level0..].iter().copied().cycle().take(len));
+    let data = with_u64(&data, KTX2_LEVEL0_BYTE_OFFSET + 8, len as u64);
+    with_u64(&data, KTX2_LEVEL0_BYTE_OFFSET + 16, len as u64)
+}
+
+/// `output_size` multiplied the header's dimensions in `u32`: 65536 x 65536
+/// RGBA32 is 2^32 pixels, a panic with overflow checks and a 0-byte buffer
+/// in release. A block or pixel count past `u32` (what one image can
+/// address, and what the reference transcoder sizes buffers in) is refused,
+/// and so is a byte size past `usize`; the transcode fails the same way
+/// before allocating.
+#[test]
+fn output_sizes_past_u32_counts_are_refused() {
+    let cases = [
+        (65536, 65536, TargetFormat::Rgba32),
+        (u32::MAX, 2, TargetFormat::Rgba32),
+        (1 << 31, 1 << 31, TargetFormat::Bc7Rgba),
+        (u32::MAX, u32::MAX, TargetFormat::Etc1Rgb),
+        (u32::MAX, u32::MAX, TargetFormat::Fxt1Rgb),
+    ];
+    for (w, h, target) in cases {
+        let data = with_dims(UASTC_MEDIUM, w, h);
+        let t = Transcoder::new(&data).unwrap();
+        assert_eq!(
+            t.output_size(0, target),
+            Err(Error::InvalidData),
+            "{w}x{h} {target:?}"
+        );
+        if t.supports(target) {
+            assert_eq!(
+                t.transcode(0, target, DecodeFlags::NONE),
+                Err(Error::InvalidData),
+                "{w}x{h} {target:?}"
+            );
+        }
+    }
+    // The largest square that still fits: 65535^2 pixels, 16 GiB of RGBA32
+    // on a 64-bit host.
+    let data = with_dims(UASTC_MEDIUM, 65535, 65535);
+    let t = Transcoder::new(&data).unwrap();
+    let want = 65535usize.checked_mul(65535 * 4);
+    assert_eq!(t.output_size(0, TargetFormat::Rgba32).ok(), want);
+}
+
+/// The ETC1S slice decoder multiplied the level's block counts in `u32`
+/// before looking at the output, so a huge header reached through the
+/// internal transcoder (which takes the caller's buffer as is) panicked
+/// there. It now refuses, like every other codec.
+#[test]
+fn block_counts_past_u32_fail_in_the_codecs() {
+    for file in [ETC1S, UASTC] {
+        let data = with_dims(file, 1 << 20, 1 << 20);
+        let t = Ktx2Transcoder::new(&data).unwrap();
+        let mut out = [0u8; 64];
+        for target in (0..=40).filter_map(TargetFormat::from_i32) {
+            assert!(t
+                .transcode_image_level(0, target.as_i32(), &mut out)
+                .is_none());
+        }
+    }
+}
+
+/// `level_blocks` shifted the base dimensions right by the level index:
+/// at 32 and up that overflows the shift (a panic with overflow checks).
+/// The internal transcoder takes the level unvalidated, so a level past the
+/// level index is refused before anything is derived from it.
+#[test]
+fn a_level_past_the_shift_width_is_refused() {
+    let t = Ktx2Transcoder::new(UASTC).unwrap();
+    let mut out = vec![0u8; 16];
+    for level in [32, 33, 40, u32::MAX] {
+        assert!(t
+            .transcode_image_level(level, TargetFormat::Rgba32.as_i32(), &mut out)
+            .is_none());
+        assert_eq!(t.header.level_dims(level), (1, 1));
+    }
+    assert_eq!(t.header.level_dims(0), (40, 40));
+    assert_eq!(t.header.level_dims(3), (5, 5));
+}
+
+/// PVRTC1 Morton-interleaves block coordinates through a 256-entry table,
+/// 8 bits at a time: a grid wider than 65536 blocks indexed past it (a
+/// panic, with or without overflow checks). 262144 x 4 texels is the widest
+/// that fits; one doubling more is refused.
+#[test]
+#[cfg(feature = "pvrtc1")]
+fn a_pvrtc1_grid_past_the_swizzle_table_is_refused() {
+    let widest = uastc_ktx2(1 << 18, 4);
+    let t = Transcoder::new(&widest).unwrap();
+    let out = t
+        .transcode(0, TargetFormat::Pvrtc1_4Rgb, DecodeFlags::NONE)
+        .unwrap();
+    assert_eq!(out.len(), (1 << 16) * 8);
+
+    let wider = uastc_ktx2(1 << 19, 4);
+    let t = Transcoder::new(&wider).unwrap();
+    assert!(t
+        .transcode(0, TargetFormat::Pvrtc1_4Rgb, DecodeFlags::NONE)
+        .is_err());
+}
+
+/// The single level of `uastc_hdr_zstd.ktx2` is Zstandard-supercompressed:
+/// 644x874 texels, 161x219 blocks, so 564144 bytes inflated.
+const UASTC_HDR_ZSTD: &[u8] = include_bytes!("../../corpus/smoke/uastc_hdr_zstd.ktx2");
+/// Level 0's `uncompressedByteLength` (u64), the third field of the level
+/// index entry.
+const KTX2_LEVEL0_UNCOMPRESSED_LENGTH: usize = KTX2_LEVEL0_BYTE_OFFSET + 16;
+
+/// The zstd inflate allocated the level's `uncompressedByteLength` up front,
+/// a size straight from the file: `u64::MAX` asked for a buffer past
+/// `isize::MAX` (a capacity-overflow panic), and anything short of that a
+/// buffer as large as the field claimed. The field must now equal the
+/// level size the dimensions imply (KTX2 defines it as the size of the
+/// level's data), checked before the buffer is allocated.
+#[test]
+#[cfg(all(feature = "zstd", feature = "hdr"))]
+fn a_zstd_length_that_disagrees_with_the_dimensions_is_refused() {
+    let exact = read_u64(UASTC_HDR_ZSTD, KTX2_LEVEL0_UNCOMPRESSED_LENGTH);
+    assert_eq!(exact, 161 * 219 * 16);
+    let target = TargetFormat::RgbaHalf;
+    let t = Transcoder::new(UASTC_HDR_ZSTD).unwrap();
+    assert!(t.transcode(0, target, DecodeFlags::NONE).is_ok());
+
+    for ulen in [u64::MAX, 1 << 63, exact + 16, exact - 16, exact * 2, 1] {
+        let data = with_u64(UASTC_HDR_ZSTD, KTX2_LEVEL0_UNCOMPRESSED_LENGTH, ulen);
+        let t = Transcoder::new(&data).unwrap();
+        assert!(
+            t.transcode(0, target, DecodeFlags::NONE).is_err(),
+            "{ulen:#x}"
+        );
+    }
+
+    // The same through a mip chain: only the level whose length disagrees
+    // fails.
+    let mip = include_bytes!("../../corpus/smoke/astc_hdr_6x6_zstd.ktx2");
+    let data = with_u64(mip, KTX2_LEVEL0_UNCOMPRESSED_LENGTH, u64::MAX);
+    let t = Transcoder::new(&data).unwrap();
+    assert!(t.transcode(0, target, DecodeFlags::NONE).is_err());
+    for level in 1..t.level_count() {
+        assert!(
+            t.transcode(level, target, DecodeFlags::NONE).is_ok(),
+            "level {level}"
+        );
+    }
+}
+
+/// Header fields the global data tests patch: `supercompressionScheme` and
+/// `sgdByteLength` (u64), and the DFD byte length (u32), whose 60-byte form
+/// declares an ETC1S file's alpha slices.
+const KTX2_SUPERCOMPRESSION: usize = 44;
+const KTX2_DFD_BYTE_LENGTH: usize = 52;
+const KTX2_SGD_BYTE_LENGTH: usize = 72;
+
+// UASTC HDR 6x6 and XUASTC under their Khronos schemes (4 and 5), with the
+// 12-byte slice descs.
+const XUASTC_ARITH: &[u8] = include_bytes!("../../corpus/smoke/xuastc_arith_12x12.ktx2");
+
+/// The ETC1S global data must lie past the 80-byte header and inside the
+/// file, as `ktx2_transcoder::init` requires of every scheme that carries
+/// it. The port read it from wherever the offset pointed (the header itself
+/// included) and never looked at its length, so a global data block that
+/// ran off the end of the file (or whose end wrapped) still opened.
+#[test]
+fn global_data_outside_the_file_or_inside_the_header_is_refused() {
+    let sgd = read_u64(ETC1S, KTX2_SGD_BYTE_OFFSET);
+    let sgd_len = read_u64(ETC1S, KTX2_SGD_BYTE_LENGTH);
+    let past_end = ETC1S.len() as u64 - sgd + 1;
+    for len in [past_end, u64::MAX, u64::MAX - sgd + 1] {
+        let data = with_u64(ETC1S, KTX2_SGD_BYTE_LENGTH, len);
+        assert!(
+            matches!(Transcoder::new(&data), Err(Error::InvalidData)),
+            "{len:#x}"
+        );
+    }
+    // Exactly to the end of the file is fine.
+    let data = with_u64(ETC1S, KTX2_SGD_BYTE_LENGTH, ETC1S.len() as u64 - sgd);
+    assert!(Transcoder::new(&data).is_ok());
+    assert!(sgd_len < ETC1S.len() as u64 - sgd);
+
+    // The intermediate formats' slice descs: an offset inside the header
+    // read header bytes as descs. 76 makes XUASTC's single desc the
+    // header's last word and the level offset, a nonzero length.
+    for (file, offset) in [
+        (XUASTC_OLD_SCHEME, 76),
+        (XUASTC_ARITH, 0),
+        (UASTC_HDR_6X6_MIP, 20),
+        (UASTC_HDR_6X6_MIP, 79),
+    ] {
+        assert!(Transcoder::new(file).is_ok());
+        let data = with_u64(file, KTX2_SGD_BYTE_OFFSET, offset);
+        assert!(
+            matches!(Transcoder::new(&data), Err(Error::InvalidData)),
+            "{offset}"
+        );
+    }
+}
+
+/// `ktx2_transcoder::decompress_etc1s_global_data` requires the global data
+/// header, one 20-byte desc per image, the endpoint, selector and table
+/// payloads and the extended data to fit `sgdByteLength`, all three payloads
+/// and both codebook counts to be nonzero, and every image to have a color
+/// slice (and an alpha slice in an alpha file). The port checked only that
+/// the payloads ended inside the file, so it read past the global data into
+/// the level data, and opened files whose transcodes could only fail.
+#[test]
+fn etc1s_global_data_is_checked_like_the_reference() {
+    let sgd = read_u64(ETC1S, KTX2_SGD_BYTE_OFFSET) as usize;
+    let sgd_len = read_u64(ETC1S, KTX2_SGD_BYTE_LENGTH);
+    let first_desc = sgd + 20;
+    let refused = [
+        // The parts fill the global data exactly: one byte less, or one
+        // byte of extended data more, no longer fits.
+        with_u64(ETC1S, KTX2_SGD_BYTE_LENGTH, sgd_len - 1),
+        with_u64(ETC1S, KTX2_SGD_BYTE_LENGTH, 19),
+        with_u32(ETC1S, sgd + 16, 1),
+        // Empty codebooks.
+        with_u32(ETC1S, sgd, 0),
+        with_u32(ETC1S, sgd, 0x0011_0000),
+        with_u32(ETC1S, sgd, 0x0000_0047),
+        // An image with no color slice.
+        with_u32(ETC1S, first_desc + 8, 0),
+        // A 60-byte DFD declares alpha, and no image has an alpha slice.
+        with_u32(ETC1S, KTX2_DFD_BYTE_LENGTH, 60),
+    ];
+    for (i, data) in refused.iter().enumerate() {
+        assert!(
+            matches!(Transcoder::new(data), Err(Error::InvalidData)),
+            "case {i}"
+        );
+    }
+
+    // ETC1S global data exists only under BasisLZ: under no
+    // supercompression the file opens without codebooks and its transcodes
+    // fail, as the reference never decodes it there.
+    let data = with_u32(ETC1S, KTX2_SUPERCOMPRESSION, 0);
+    let t = Transcoder::new(&data).unwrap();
+    assert!(t
+        .transcode(0, TargetFormat::Rgba32, DecodeFlags::NONE)
+        .is_err());
+}
+
+/// Byte offsets the `.basis` tests patch: the header's data size (u32) and,
+/// within a 23-byte slice desc, the original width and height and the block
+/// counts (u16 each) and the slice's byte length (u32).
+const BASIS_DATA_SIZE: usize = 8;
+const BASIS_SLICE_DESC_OFS: usize = 65;
+const SLICE_ORIG_WIDTH: usize = 5;
+const SLICE_ORIG_HEIGHT: usize = 7;
+const SLICE_NUM_BLOCKS_X: usize = 9;
+const SLICE_NUM_BLOCKS_Y: usize = 11;
+const SLICE_FILE_SIZE: usize = 17;
+
+/// A copy of the `.basis` `file` with the u16 or u32 (`width` bytes) at byte
+/// `at` of its first slice desc set to `value`.
+fn with_slice0(file: &[u8], at: usize, width: usize, value: u32) -> Vec<u8> {
+    let desc = BASIS_SLICE_DESC_OFS;
+    let desc = u32::from_le_bytes(file[desc..desc + 4].try_into().unwrap()) as usize;
+    let mut data = file.to_vec();
+    data[desc + at..desc + at + width].copy_from_slice(&value.to_le_bytes()[..width]);
+    data
+}
+
+/// The header's data size is a u32 added to the header size: on a 32-bit
+/// `usize` (wasm32) `77 + u32::MAX` overflowed. Refused on every target;
+/// `tests/wasm.rs` runs it under wasm32.
+#[test]
+fn a_basis_data_size_past_the_file_is_refused() {
+    let data = with_u32(BASIS_ETC1S, BASIS_DATA_SIZE, u32::MAX);
+    assert!(matches!(Transcoder::new(&data), Err(Error::InvalidData)));
+}
+
+/// A `.basis` slice records its block counts and byte length apart from its
+/// pixel size, and the codecs index the output by both. A grid wider or
+/// taller than the pixel size implies wrote past the FXT1 grid, subtracted
+/// past zero in the UASTC HDR, ASTC HDR 6x6 and raw-ASTC reblocking clamps,
+/// and read past the decoded 6x6 blocks; a grid with no blocks divided by
+/// zero; a byte length shorter than the grid read past the slice. Each was
+/// a panic (most of them in release too). Each now fails the transcode.
+#[test]
+fn basis_slices_that_disagree_with_their_size_fail_the_transcode() {
+    let uastc_hdr = include_bytes!("../../corpus/smoke/uastc_hdr.basis");
+    let hdr_6x6i = include_bytes!("../../corpus/smoke/uastc_hdr_6x6i.basis");
+    let xuastc = include_bytes!("../../corpus/smoke/xuastc_5x4.basis");
+    let cases: [(&[u8], usize, usize, u32, TargetFormat); 9] = [
+        (BASIS_ETC1S, SLICE_ORIG_WIDTH, 2, 1, TargetFormat::Fxt1Rgb),
+        (BASIS_ETC1S, SLICE_ORIG_HEIGHT, 2, 6, TargetFormat::Fxt1Rgb),
+        (BASIS_UASTC, SLICE_NUM_BLOCKS_X, 2, 0, TargetFormat::Rgba32),
+        (BASIS_UASTC, SLICE_FILE_SIZE, 4, 12, TargetFormat::Bc1Rgb),
+        (
+            BASIS_UASTC,
+            SLICE_FILE_SIZE,
+            4,
+            0x8000,
+            TargetFormat::Bc7Rgba,
+        ),
+        (uastc_hdr, SLICE_ORIG_WIDTH, 2, 4, TargetFormat::RgbaHalf),
+        (hdr_6x6i, SLICE_NUM_BLOCKS_X, 2, 0x7f, TargetFormat::Bc6h),
+        (hdr_6x6i, SLICE_NUM_BLOCKS_Y, 2, 1000, TargetFormat::Bc6h),
+        (xuastc, SLICE_ORIG_HEIGHT, 2, 0, TargetFormat::Rgba32),
+    ];
+    for (file, at, width, value, target) in cases {
+        let data = with_slice0(file, at, width, value);
+        let t = Transcoder::new(&data).unwrap();
+        if !t.supports(target) {
+            continue;
+        }
+        assert!(
+            t.transcode(0, target, DecodeFlags::NONE).is_err(),
+            "slice field {at} = {value:#x}, {target:?}"
+        );
     }
 }
 

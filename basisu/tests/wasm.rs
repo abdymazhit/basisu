@@ -11,7 +11,7 @@
 
 #![cfg(target_arch = "wasm32")]
 
-use basisu::{DecodeFlags, SourceFormat, TargetFormat, Transcoder};
+use basisu::{DecodeFlags, Error, SourceFormat, TargetFormat, Transcoder};
 use wasm_bindgen_test::wasm_bindgen_test;
 
 /// KTX2 fixture with an ETC1S (BasisLZ) payload.
@@ -23,6 +23,8 @@ const BASIS: &[u8] = include_bytes!("fixtures/etc1s.basis");
 /// The kazmaps-gl fuzz crash texture: ETC1S KTX2 whose supercompression global
 /// data offset is `u64::MAX` (see `tests/api.rs`).
 const FUZZ_SGD_OFFSET_MAX: &[u8] = include_bytes!("fixtures/fuzz_etc1s_sgd_offset_max.ktx2");
+/// A UASTC HDR 4x4 KTX2 whose one level is Zstandard-supercompressed.
+const UASTC_HDR_ZSTD: &[u8] = include_bytes!("../../corpus/smoke/uastc_hdr_zstd.ktx2");
 
 /// The four targets the typical consumer selects from device capabilities.
 const TARGETS: [TargetFormat; 4] = [
@@ -152,4 +154,64 @@ fn offsets_and_sums_past_4_gib_are_refused_under_wasm() {
             .transcode(0, TargetFormat::Rgba32, DecodeFlags::NONE)
             .is_err());
     }
+}
+
+/// KTX2 header fields the dimension test patches: `pixelWidth` and
+/// `pixelHeight` (u32 each).
+const KTX2_PIXEL_WIDTH: usize = 20;
+const KTX2_PIXEL_HEIGHT: usize = 24;
+
+/// `usize` is 32 bits here. 32768 x 32768 RGBA32 is 2^30 pixels, a count that
+/// fits, but 4 GiB, a byte size that does not: `output_size` multiplied it
+/// unchecked (a panic with overflow checks, a 0-byte buffer in release). It
+/// is refused, and the transcode fails the same way before allocating. The
+/// host runs the count cases in `tests/api.rs`.
+#[wasm_bindgen_test]
+fn an_output_size_past_usize_is_refused_under_wasm() {
+    let dims = |side: u32| {
+        let data = with_u32(UASTC, KTX2_PIXEL_WIDTH, side);
+        with_u32(&data, KTX2_PIXEL_HEIGHT, side)
+    };
+    let data = dims(32768);
+    let t = Transcoder::new(&data).unwrap();
+    assert_eq!(
+        t.output_size(0, TargetFormat::Rgba32),
+        Err(Error::InvalidData)
+    );
+    assert_eq!(
+        t.transcode(0, TargetFormat::Rgba32, DecodeFlags::NONE),
+        Err(Error::InvalidData)
+    );
+    let data = dims(16384);
+    let t = Transcoder::new(&data).unwrap();
+    assert_eq!(t.output_size(0, TargetFormat::Rgba32), Ok(1 << 30));
+}
+
+/// A zstd level's `uncompressedByteLength` sized the inflate buffer as is:
+/// here a length just under 4 GiB fits `usize`, and the buffer it asked for
+/// cannot exist. It must equal the size the level's dimensions imply, so the
+/// level is refused before anything is allocated. The host runs this in
+/// `tests/api.rs`.
+#[wasm_bindgen_test]
+fn a_zstd_length_past_the_level_size_is_refused_under_wasm() {
+    let ulen = KTX2_LEVEL0_BYTE_OFFSET + 16;
+    let data = with_u64(UASTC_HDR_ZSTD, ulen, u64::from(u32::MAX) - 15);
+    let t = Transcoder::new(&data).unwrap();
+    assert!(t
+        .transcode(0, TargetFormat::RgbaHalf, DecodeFlags::NONE)
+        .is_err());
+    let t = Transcoder::new(UASTC_HDR_ZSTD).unwrap();
+    assert!(t
+        .transcode(0, TargetFormat::RgbaHalf, DecodeFlags::NONE)
+        .is_ok());
+}
+
+/// The `.basis` header's data size is a u32 added to the header size: here
+/// `77 + u32::MAX` overflowed `usize` (a panic with overflow checks). It is
+/// a checked sum, refused like any size past the file.
+#[wasm_bindgen_test]
+fn a_basis_data_size_past_usize_is_refused_under_wasm() {
+    let data = with_u32(BASIS, 8, u32::MAX);
+    assert!(Transcoder::new(&data).is_err());
+    assert!(Transcoder::new(BASIS).is_ok());
 }

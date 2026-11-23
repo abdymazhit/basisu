@@ -61,6 +61,21 @@ pub mod decode_flags {
     pub const NO_ETC1S_CHROMA_FILTERING: u32 = 64;
 }
 
+/// Cells in a `w` x `h` grid (an image's blocks or pixels). The dimensions
+/// come from the file, so every count derived from them goes through here
+/// instead of a bare `w * h`. `None` when the count does not fit `u32`:
+/// the codecs index one image with 32-bit math, and the reference transcoder
+/// sizes its output buffers as `u32` block or pixel counts.
+pub(crate) fn grid_len(w: u32, h: u32) -> Option<usize> {
+    usize::try_from(w.checked_mul(h)?).ok()
+}
+
+/// Bytes of a `w` x `h` grid of `unit`-byte cells: [`grid_len`] times
+/// `unit`, `None` if either does not fit.
+pub(crate) fn grid_bytes(w: u32, h: u32, unit: usize) -> Option<usize> {
+    grid_len(w, h)?.checked_mul(unit)
+}
+
 /// `mul_8(v, q)`: rounded requantize of an 8-bit `v` to a q-scaled value, used
 /// by the UASTC 565/4444 packs. `q` is the target maximum (31, 63, or 15).
 #[inline]
@@ -92,7 +107,10 @@ pub fn transcode_etc1s(
     video: Option<(&mut crate::basislz::etc1s::VideoState, u32)>,
     out: &mut [u8],
 ) -> Option<()> {
-    let vid = video.map(|(state, level)| state.slots(level as usize, (bx * by) as usize));
+    let vid = match video {
+        Some((state, level)) => Some(state.slots(level as usize, grid_len(bx, by)?)),
+        None => None,
+    };
     match fmt {
         #[cfg(feature = "astc")]
         target::ASTC_4X4_RGBA => match alpha {
@@ -214,7 +232,10 @@ pub fn transcode_uastc(
     flags: u32,
     out: &mut [u8],
 ) -> Option<()> {
-    let n = (bx * by) as usize;
+    let n = grid_len(bx, by)?;
+    // A `.basis` slice's byte length is recorded apart from its block counts:
+    // the image must hold every block the loops below read.
+    let img = img.get(..n.checked_mul(16)?)?;
 
     // PVRTC1 is image-global: it can't go through the per-block loop. Build the
     // whole image at once (per-block bounding-box endpoints, then a whole-image
@@ -241,7 +262,7 @@ pub fn transcode_uastc(
         target::RGBA32 | target::RGB565 | target::BGR565 | target::RGBA4444
     ) {
         let bpp = if fmt == target::RGBA32 { 4 } else { 2 };
-        if out.len() != (lw * lh) as usize * bpp {
+        if Some(out.len()) != grid_bytes(lw, lh, bpp) {
             return None;
         }
         out.fill(0);
@@ -250,8 +271,8 @@ pub fn transcode_uastc(
             let px = unpack_uastc(&src, false)?;
             let block_x = b as u32 % bx;
             let block_y = b as u32 / bx;
-            let max_x = (lw as i32 - block_x as i32 * 4).clamp(0, 4) as u32;
-            let max_y = (lh as i32 - block_y as i32 * 4).clamp(0, 4) as u32;
+            let max_x = lw.saturating_sub(block_x.saturating_mul(4)).min(4);
+            let max_y = lh.saturating_sub(block_y.saturating_mul(4)).min(4);
             for y in 0..max_y {
                 for x in 0..max_x {
                     let c = px[(y * 4 + x) as usize];
@@ -419,7 +440,7 @@ pub fn transcode_uastc_hdr(
 /// target is what declares it ASTC.
 #[cfg(any(feature = "hdr", feature = "astc-ldr"))]
 fn astc_passthrough(img: &[u8], bx: u32, by: u32, out: &mut [u8]) -> Option<()> {
-    let total = (bx * by) as usize * 16;
+    let total = grid_bytes(bx, by, 16)?;
     let src = img.get(..total)?;
     if out.len() != total {
         return None;

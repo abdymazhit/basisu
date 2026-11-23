@@ -8,6 +8,7 @@ use super::endpoints::{cem_has_alpha, decode_endpoints, num_cem_values};
 use crate::astc::decode::decode_block_ldr8;
 use crate::astc::dequant::dequant_tables;
 use crate::astc::unpack::{unpack_block, LogAstcBlock};
+use crate::dispatch::{grid_bytes, grid_len};
 use crate::fastenc::bc7f::{
     self, determine_unique_pbits, encode_mode6_rgba_block, pack_mode5_solid, Rgba,
 };
@@ -160,13 +161,14 @@ fn transcode_bc7_fast_4x4(
     has_alpha: bool,
     out: &mut [u8],
 ) -> Option<()> {
-    if out.len() != (bx * by) as usize * 16 {
+    let n = grid_len(bx, by)?;
+    if Some(out.len()) != n.checked_mul(16) {
         return None;
     }
     out.fill(0);
     let bc7f_flags = bc7f::flags::DEFAULT;
 
-    for i in 0..(bx * by) as usize {
+    for i in 0..n {
         let src: &[u8; 16] = blocks[i * 16..i * 16 + 16].try_into().ok()?;
         let log = unpack_block(src, 4, 4)?;
         let dst: &mut [u8; 16] = (&mut out[i * 16..i * 16 + 16]).try_into().ok()?;
@@ -814,7 +816,7 @@ fn transcode_bc7_fast_8x6(
 ) -> Option<()> {
     let dst_nx = lw.div_ceil(4);
     let dst_ny = lh.div_ceil(4);
-    if out.len() != (dst_nx * dst_ny) as usize * 16 {
+    if Some(out.len()) != grid_bytes(dst_nx, dst_ny, 16) {
         return None;
     }
     out.fill(0);
@@ -822,8 +824,9 @@ fn transcode_bc7_fast_8x6(
     const ENDPOINT_TOL: i32 = 0;
 
     // Unpack every physical block back to its logical form once.
-    let mut logs = Vec::with_capacity((bx * by) as usize);
-    for i in 0..(bx * by) as usize {
+    let n = grid_len(bx, by)?;
+    let mut logs = Vec::with_capacity(n);
+    for i in 0..n {
         let src: &[u8; 16] = blocks[i * 16..i * 16 + 16].try_into().ok()?;
         logs.push(unpack_block(src, 8, 6)?);
     }
@@ -1002,15 +1005,16 @@ fn transcode_bc7_fast_6x6(
 ) -> Option<()> {
     let dst_nx = lw.div_ceil(4);
     let dst_ny = lh.div_ceil(4);
-    if out.len() != (dst_nx * dst_ny) as usize * 16 {
+    if Some(out.len()) != grid_bytes(dst_nx, dst_ny, 16) {
         return None;
     }
     out.fill(0);
     let bc7f_flags = bc7f::flags::DEFAULT;
     const ENDPOINT_TOL: i32 = 1;
 
-    let mut logs = Vec::with_capacity((bx * by) as usize);
-    for i in 0..(bx * by) as usize {
+    let n = grid_len(bx, by)?;
+    let mut logs = Vec::with_capacity(n);
+    for i in 0..n {
         let src: &[u8; 16] = blocks[i * 16..i * 16 + 16].try_into().ok()?;
         logs.push(unpack_block(src, 6, 6)?);
     }
