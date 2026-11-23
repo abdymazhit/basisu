@@ -88,6 +88,15 @@ fn rd32(d: &[u8], o: usize) -> u32 {
     u32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]])
 }
 
+/// Images in the file, `max(levels, 1) * max(layers, 1) * max(faces, 1)`: one
+/// descriptor each in the supercompression global data. `None` if the
+/// product overflows `usize` (a corrupt layer count on wasm32).
+fn image_count(header: &Ktx2Header) -> Option<usize> {
+    (header.level_count.max(1) as usize)
+        .checked_mul(header.layer_count.max(1) as usize)?
+        .checked_mul(header.face_count.max(1) as usize)
+}
+
 impl<'a> Ktx2Transcoder<'a> {
     /// Parse + prepare a KTX2 file. `None` if it is not a Basis payload or the
     /// supercompression global data is malformed.
@@ -112,12 +121,13 @@ impl<'a> Ktx2Transcoder<'a> {
                 (1, _) => 8,
                 _ => return None,
             };
-            let image_count = (header.level_count.max(1)
-                * header.layer_count.max(1)
-                * header.face_count.max(1)) as usize;
-            let sgd = header.sgd_byte_offset as usize;
-            if header.sgd_byte_length as usize != image_count * desc_size
-                || sgd + image_count * desc_size > data.len()
+            let image_count = image_count(&header)?;
+            let descs_len = image_count.checked_mul(desc_size)?;
+            let sgd = usize::try_from(header.sgd_byte_offset).ok()?;
+            if header.sgd_byte_length != descs_len as u64
+                || sgd
+                    .checked_add(descs_len)
+                    .is_none_or(|end| end > data.len())
             {
                 return None;
             }
@@ -136,8 +146,12 @@ impl<'a> Ktx2Transcoder<'a> {
             // BasisLZ global data header (20 bytes): endpoint/selector counts
             // (u16 each), the endpoint/selector/table byte lengths (u32 each),
             // and an extendedByteLength u32 this decoder never needs.
-            let sgd = header.sgd_byte_offset as usize;
-            if sgd + 20 > data.len() {
+            //
+            // The offset and the lengths below come from the file: the u64
+            // offset must fit `usize` (wasm32), and every sum is checked so
+            // none can wrap past a bounds check.
+            let sgd = usize::try_from(header.sgd_byte_offset).ok()?;
+            if sgd.checked_add(20).is_none_or(|end| end > data.len()) {
                 return None;
             }
             let num_e = rd16(data, sgd);
@@ -146,11 +160,8 @@ impl<'a> Ktx2Transcoder<'a> {
             let s_len = rd32(data, sgd + 8) as usize;
             let t_len = rd32(data, sgd + 12) as usize;
 
-            let num_levels = header.level_count.max(1) as usize;
-            let image_count =
-                num_levels * header.layer_count.max(1) as usize * header.face_count.max(1) as usize;
-
-            let descs_end = sgd + 20 + 20 * image_count;
+            let image_count = image_count(&header)?;
+            let descs_end = image_count.checked_mul(20)?.checked_add(sgd + 20)?;
             if descs_end > data.len() {
                 return None;
             }
@@ -168,18 +179,15 @@ impl<'a> Ktx2Transcoder<'a> {
             // The payloads follow the image descs in a fixed order: endpoint
             // codebook, selector codebook, Huffman tables.
             let e_ofs = descs_end;
-            let s_ofs = e_ofs + e_len;
-            let t_ofs = s_ofs + s_len;
-            if t_ofs + t_len > data.len() {
+            let s_ofs = e_ofs.checked_add(e_len)?;
+            let t_ofs = s_ofs.checked_add(s_len)?;
+            let t_end = t_ofs.checked_add(t_len)?;
+            if t_end > data.len() {
                 return None;
             }
             let mut t = Etc1sTranscoder::new();
-            if !t.decode_palettes(
-                num_e,
-                &data[e_ofs..e_ofs + e_len],
-                num_s,
-                &data[s_ofs..s_ofs + s_len],
-            ) || !t.decode_tables(&data[t_ofs..t_ofs + t_len])
+            if !t.decode_palettes(num_e, &data[e_ofs..s_ofs], num_s, &data[s_ofs..t_ofs])
+                || !t.decode_tables(&data[t_ofs..t_end])
             {
                 return None;
             }
@@ -224,24 +232,35 @@ impl<'a> Ktx2Transcoder<'a> {
         (lw.div_ceil(bw), lh.div_ceil(bh))
     }
 
+    /// Index of image (level, layer, face) in the per-image descriptor arrays:
+    /// level-major, then layer, then face. `None` if it overflows `usize`.
+    fn image_index(&self, level: u32, layer: u32, face: u32) -> Option<usize> {
+        (level as usize)
+            .checked_mul(self.header.layer_count.max(1) as usize)?
+            .checked_add(layer as usize)?
+            .checked_mul(self.header.face_count.max(1) as usize)?
+            .checked_add(face as usize)
+    }
+
+    /// The `len` bytes at `ofs` within mip `level`'s data (an image's slice).
+    /// `None` if the range leaves the file, or if the level's u64 file offset
+    /// does not fit `usize` or the sum overflows.
+    fn level_bytes(&self, level: u32, ofs: u32, len: u32) -> Option<&[u8]> {
+        let level_ofs = self.header.levels.get(level as usize)?.byte_offset;
+        let start = usize::try_from(level_ofs).ok()?.checked_add(ofs as usize)?;
+        self.data.get(start..start.checked_add(len as usize)?)
+    }
+
     /// ETC1S RGB (+ optional alpha) slice bytes for image (level, layer, face).
     fn etc1s_slices(&self, level: u32, layer: u32, face: u32) -> Option<(&[u8], Option<&[u8]>)> {
-        let face_count = self.header.face_count.max(1);
-        let idx = (level * self.header.layer_count.max(1) * face_count + layer * face_count + face)
-            as usize;
-        let d = self.image_descs.get(idx)?;
-        let lo = self.header.levels[level as usize].byte_offset as usize;
-        let rgb = self
-            .data
-            .get(lo + d.rgb_ofs as usize..lo + d.rgb_ofs as usize + d.rgb_len as usize)?;
-        let alpha =
-            if self.header.has_alpha {
-                Some(self.data.get(
-                    lo + d.alpha_ofs as usize..lo + d.alpha_ofs as usize + d.alpha_len as usize,
-                )?)
-            } else {
-                None
-            };
+        let image = self.image_index(level, layer, face)?;
+        let d = self.image_descs.get(image)?;
+        let rgb = self.level_bytes(level, d.rgb_ofs, d.rgb_len)?;
+        let alpha = if self.header.has_alpha {
+            Some(self.level_bytes(level, d.alpha_ofs, d.alpha_len)?)
+        } else {
+            None
+        };
         Some((rgb, alpha))
     }
 
@@ -344,15 +363,9 @@ impl<'a> Ktx2Transcoder<'a> {
             // against the level's block counts.
             #[cfg(feature = "xuastc")]
             BasisFormat::XuastcLdr(b) => {
-                let face_count = self.header.face_count.max(1);
-                let image_index = (level * self.header.layer_count.max(1) * face_count
-                    + layer * face_count
-                    + face) as usize;
-                let &(ofs, len) = self.slice_descs.get(image_index)?;
-                let lo = self.header.levels.get(level as usize)?.byte_offset as usize;
-                let stream = self
-                    .data
-                    .get(lo + ofs as usize..lo + ofs as usize + len as usize)?;
+                let image = self.image_index(level, layer, face)?;
+                let &(ofs, len) = self.slice_descs.get(image)?;
+                let stream = self.level_bytes(level, ofs, len)?;
                 crate::xuastc::transcode::transcode_xuastc(
                     stream, b, bx, by, lw, lh, fmt, flags, out,
                 )
@@ -363,15 +376,9 @@ impl<'a> Ktx2Transcoder<'a> {
             // first; the per-target paths are then the raw 6x6 ones.
             #[cfg(feature = "hdr")]
             BasisFormat::UastcHdr6x6 => {
-                let face_count = self.header.face_count.max(1);
-                let image_index = (level * self.header.layer_count.max(1) * face_count
-                    + layer * face_count
-                    + face) as usize;
-                let &(ofs, len) = self.slice_descs.get(image_index)?;
-                let lo = self.header.levels.get(level as usize)?.byte_offset as usize;
-                let stream = self
-                    .data
-                    .get(lo + ofs as usize..lo + ofs as usize + len as usize)?;
+                let image = self.image_index(level, layer, face)?;
+                let &(ofs, len) = self.slice_descs.get(image)?;
+                let stream = self.level_bytes(level, ofs, len)?;
                 let (blocks, dec_w, dec_h) = crate::uastc_hdr_6x6::decode_6x6_hdr(stream)?;
                 // The decoded dimensions must match the level's, or the stream
                 // is inconsistent with the container.
@@ -406,10 +413,12 @@ impl<'a> Ktx2Transcoder<'a> {
         lh: u32,
         out: &mut [u8],
     ) -> Option<()> {
-        let l = &self.header.levels[level as usize];
-        let comp = self
-            .data
-            .get(l.byte_offset as usize..(l.byte_offset + l.byte_length) as usize)?;
+        let l = self.header.levels.get(level as usize)?;
+        // The level index holds u64 file offsets: they must fit `usize`
+        // (wasm32), and the level's end must not wrap.
+        let start = usize::try_from(l.byte_offset).ok()?;
+        let end = start.checked_add(usize::try_from(l.byte_length).ok()?)?;
+        let comp = self.data.get(start..end)?;
         // ss=2 (Zstandard): inflate the whole level to its uncompressed length
         // before indexing the per-image data. ss=1 (BasisLZ) never reaches the
         // raw-block path.
@@ -417,7 +426,7 @@ impl<'a> Ktx2Transcoder<'a> {
         let level_data: &[u8] = match self.header.supercompression {
             0 => comp,
             2 => {
-                let want = l.uncompressed_byte_length as usize;
+                let want = usize::try_from(l.uncompressed_byte_length).ok()?;
                 level_owned = zstd_inflate(comp, want)?;
                 &level_owned
             }
@@ -432,11 +441,12 @@ impl<'a> Ktx2Transcoder<'a> {
         {
             return None;
         }
-        let n = (bx * by) as usize;
-        let total_2d = n * 16;
-        let face_count = self.header.face_count.max(1) as usize;
-        let img_ofs = (layer as usize * face_count + face as usize) * total_2d;
-        let img = level_data.get(img_ofs..img_ofs + total_2d)?;
+        let total_2d = (bx as usize).checked_mul(by as usize)?.checked_mul(16)?;
+        let img_ofs = (layer as usize)
+            .checked_mul(self.header.face_count.max(1) as usize)?
+            .checked_add(face as usize)?
+            .checked_mul(total_2d)?;
+        let img = level_data.get(img_ofs..img_ofs.checked_add(total_2d)?)?;
 
         match self.header.format {
             #[cfg(feature = "hdr")]

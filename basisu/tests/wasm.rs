@@ -20,6 +20,9 @@ const ETC1S: &[u8] = include_bytes!("fixtures/etc1s.ktx2");
 const UASTC: &[u8] = include_bytes!("fixtures/uastc.ktx2");
 /// `.basis` fixture with an ETC1S payload.
 const BASIS: &[u8] = include_bytes!("fixtures/etc1s.basis");
+/// The kazmaps-gl fuzz crash texture: ETC1S KTX2 whose supercompression global
+/// data offset is `u64::MAX` (see `tests/api.rs`).
+const FUZZ_SGD_OFFSET_MAX: &[u8] = include_bytes!("fixtures/fuzz_etc1s_sgd_offset_max.ktx2");
 
 /// The four targets the typical consumer selects from device capabilities.
 const TARGETS: [TargetFormat; 4] = [
@@ -96,4 +99,57 @@ fn uastc_high_quality_bc7_under_wasm() {
         .transcode(0, TargetFormat::Bc7Rgba, DecodeFlags::HIGH_QUALITY)
         .expect("hq transcode");
     assert_eq!(hq.len(), t.output_size(0, TargetFormat::Bc7Rgba).unwrap());
+}
+
+/// KTX2 header fields the offset test patches: `layerCount` (u32),
+/// `sgdByteOffset` (u64), and level 0's `byteOffset` (u64).
+const KTX2_LAYER_COUNT: usize = 32;
+const KTX2_SGD_BYTE_OFFSET: usize = 64;
+const KTX2_LEVEL0_BYTE_OFFSET: usize = 80;
+
+/// The little-endian u64 at byte `at` of `file`.
+fn read_u64(file: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(file[at..at + 8].try_into().unwrap())
+}
+
+/// A copy of `file` with the little-endian u64 at byte `at` set to `value`.
+fn with_u64(file: &[u8], at: usize, value: u64) -> Vec<u8> {
+    let mut data = file.to_vec();
+    data[at..at + 8].copy_from_slice(&value.to_le_bytes());
+    data
+}
+
+/// A copy of `file` with the little-endian u32 at byte `at` set to `value`.
+fn with_u32(file: &[u8], at: usize, value: u32) -> Vec<u8> {
+    let mut data = file.to_vec();
+    data[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    data
+}
+
+/// `usize` is 32 bits here. A u64 file offset past 4 GiB is refused rather
+/// than cut to its low bits (which read the codebooks or a level from the
+/// wrong place without an error), and a sum of an in-file offset and a u32
+/// length or count cannot wrap: each of these used to panic or misread. The
+/// host runs the same cases in `tests/api.rs`.
+#[wasm_bindgen_test]
+fn offsets_and_sums_past_4_gib_are_refused_under_wasm() {
+    let sgd = read_u64(ETC1S, KTX2_SGD_BYTE_OFFSET);
+    let refused = [
+        FUZZ_SGD_OFFSET_MAX.to_vec(),
+        with_u64(ETC1S, KTX2_SGD_BYTE_OFFSET, u64::MAX),
+        with_u64(ETC1S, KTX2_SGD_BYTE_OFFSET, sgd + (1 << 32)),
+        with_u32(ETC1S, sgd as usize + 4, u32::MAX),
+        with_u32(ETC1S, KTX2_LAYER_COUNT, u32::MAX),
+    ];
+    for data in refused {
+        assert!(Transcoder::new(&data).is_err());
+    }
+    for file in [ETC1S, UASTC] {
+        let level0 = read_u64(file, KTX2_LEVEL0_BYTE_OFFSET);
+        let data = with_u64(file, KTX2_LEVEL0_BYTE_OFFSET, level0 + (1 << 32));
+        let t = Transcoder::new(&data).unwrap();
+        assert!(t
+            .transcode(0, TargetFormat::Rgba32, DecodeFlags::NONE)
+            .is_err());
+    }
 }
