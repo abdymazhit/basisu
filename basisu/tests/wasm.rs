@@ -103,9 +103,11 @@ fn uastc_high_quality_bc7_under_wasm() {
     assert_eq!(hq.len(), t.output_size(0, TargetFormat::Bc7Rgba).unwrap());
 }
 
-/// KTX2 header fields the offset test patches: `layerCount` (u32),
-/// `sgdByteOffset` (u64), and level 0's `byteOffset` (u64).
+/// KTX2 header fields the offset test patches: `layerCount` and
+/// `kvdByteLength` (u32 each), `sgdByteOffset` (u64), and level 0's
+/// `byteOffset` (u64).
 const KTX2_LAYER_COUNT: usize = 32;
+const KTX2_KVD_BYTE_LENGTH: usize = 60;
 const KTX2_SGD_BYTE_OFFSET: usize = 64;
 const KTX2_LEVEL0_BYTE_OFFSET: usize = 80;
 
@@ -131,8 +133,9 @@ fn with_u32(file: &[u8], at: usize, value: u32) -> Vec<u8> {
 /// `usize` is 32 bits here. A u64 file offset past 4 GiB is refused rather
 /// than cut to its low bits (which read the codebooks or a level from the
 /// wrong place without an error), and a sum of an in-file offset and a u32
-/// length or count cannot wrap: each of these used to panic or misread. The
-/// host runs the same cases in `tests/api.rs`.
+/// length or count (the key/value block's end among them) cannot wrap: each
+/// of these used to panic, misread, or open. The host runs the same cases in
+/// `tests/api.rs`.
 #[wasm_bindgen_test]
 fn offsets_and_sums_past_4_gib_are_refused_under_wasm() {
     let sgd = read_u64(ETC1S, KTX2_SGD_BYTE_OFFSET);
@@ -142,6 +145,7 @@ fn offsets_and_sums_past_4_gib_are_refused_under_wasm() {
         with_u64(ETC1S, KTX2_SGD_BYTE_OFFSET, sgd + (1 << 32)),
         with_u32(ETC1S, sgd as usize + 4, u32::MAX),
         with_u32(ETC1S, KTX2_LAYER_COUNT, u32::MAX),
+        with_u32(UASTC, KTX2_KVD_BYTE_LENGTH, u32::MAX),
     ];
     for data in refused {
         assert!(Transcoder::new(&data).is_err());

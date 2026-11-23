@@ -686,6 +686,47 @@ fn a_dfd_whose_size_disagrees_is_refused() {
     ]);
 }
 
+/// `ktx2_transcoder::read_key_values` refuses key/value data with an offset
+/// but no length, a block that ends past the file (a checked sum here), and
+/// a malformed entry: shorter than 2 bytes, longer than the rest of the
+/// block, a key with no NUL, or padding past the end of the block. The port
+/// scanned the block only for `KTXanimData` and took any of these for "no
+/// such key", so the file opened.
+#[test]
+fn key_value_data_is_read_like_the_reference() {
+    let kvd = read_u32(UASTC, KTX2_KVD_BYTE_OFFSET) as usize;
+    let kvd_len = read_u32(UASTC, KTX2_KVD_BYTE_LENGTH);
+    // One entry, a 48-byte `KTXwriter`, fills the block.
+    assert_eq!(read_u32(UASTC, kvd), kvd_len - 4);
+    assert_eq!(&UASTC[kvd + 4..kvd + 14], b"KTXwriter\0");
+    let mut no_nul = UASTC.to_vec();
+    no_nul[kvd + 4..kvd + 52].fill(b'x');
+    // A 45-byte entry needs 3 bytes of padding; the block ends 1 byte after
+    // it.
+    let short_padding = with_u32(&with_u32(UASTC, kvd, 45), KTX2_KVD_BYTE_LENGTH, 50);
+    let past_file = (UASTC.len() - kvd) as u32 + 1;
+    assert_refused(&[
+        (
+            "offset, no length",
+            with_u32(UASTC, KTX2_KVD_BYTE_LENGTH, 0),
+        ),
+        (
+            "past the file",
+            with_u32(UASTC, KTX2_KVD_BYTE_LENGTH, past_file),
+        ),
+        (
+            "length u32::MAX",
+            with_u32(UASTC, KTX2_KVD_BYTE_LENGTH, u32::MAX),
+        ),
+        ("entry of 1 byte", with_u32(UASTC, kvd, 1)),
+        ("entry past the block", with_u32(UASTC, kvd, kvd_len - 3)),
+        ("key with no NUL", no_nul),
+        ("padding past the block", short_padding),
+    ]);
+    // No key/value data at all is fine.
+    assert!(Transcoder::new(&without_kvd(UASTC)).is_ok());
+}
+
 /// Byte offsets the `.basis` tests patch: the header's data size (u32) and,
 /// within a 23-byte slice desc, the original width and height and the block
 /// counts (u16 each) and the slice's byte length (u32).

@@ -203,7 +203,7 @@ impl Ktx2Header {
     /// model, or a texture shape this crate rejects: 1D/3D, DEFLATE
     /// supercompression, bad face/level counts), or if its layout is one
     /// `ktx2_transcoder::init` refuses: a block inside the header or past the
-    /// end of the file, or a DFD whose sizes disagree.
+    /// end of the file, a DFD whose sizes disagree, malformed key/value data.
     pub fn parse(data: &[u8]) -> Option<Ktx2Header> {
         if data.len() < KTX2_HEADER_SIZE || data[..12] != KTX2_MAGIC {
             return None;
@@ -430,7 +430,7 @@ impl Ktx2Header {
             return None;
         };
 
-        let has_anim_key = has_kvd_key(data, kvd_byte_offset, kvd_byte_length, b"KTXanimData");
+        let has_anim_key = find_kvd_key(data, kvd_byte_offset, kvd_byte_length, b"KTXanimData")?;
 
         Some(Ktx2Header {
             width,
@@ -466,75 +466,117 @@ impl Ktx2Header {
     }
 }
 
-/// Scan the KTX2 key/value data for a NUL-terminated `key`. Each entry is a
-/// `u32` byte length followed by `key\0value` padded up to a 4-byte boundary.
-/// Used to detect the `KTXanimData` video marker. A malformed entry stops the
-/// scan and returns false, so the marker is treated as absent.
-fn has_kvd_key(data: &[u8], kvd_offset: u32, kvd_length: u32, key: &[u8]) -> bool {
+/// Read the KTX2 key/value data as `ktx2_transcoder::read_key_values` does
+/// and report whether it holds the NUL-terminated `key` (the `KTXanimData`
+/// video marker). Each entry is a `u32` byte length followed by `key\0value`,
+/// padded up to a 4-byte boundary of the file. `None` where the reference
+/// refuses the file: an offset with no length, a block inside the header or
+/// past the end of the file, or a malformed entry (shorter than 2 bytes,
+/// longer than the rest of the block, a key with no NUL, or padding past the
+/// end of the block). Every entry is read, those after `key` too.
+fn find_kvd_key(data: &[u8], kvd_offset: u32, kvd_length: u32, key: &[u8]) -> Option<bool> {
     if kvd_length == 0 {
-        return false;
+        return (kvd_offset == 0).then_some(false);
     }
     let start = kvd_offset as usize;
+    if start < KTX2_HEADER_SIZE {
+        return None;
+    }
     // Two u32 fields can overflow a 32-bit `usize` (wasm32).
-    let Some(end) = start.checked_add(kvd_length as usize) else {
-        return false;
-    };
-    if end > data.len() {
-        return false;
-    }
-    let mut p = start;
-    // The last entry's padding can step `p` up to 3 bytes past `end`: that
-    // ends the scan, like the reference transcoder's alignment check.
-    while end.saturating_sub(p) > 4 {
-        let l = u32::from_le_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]]) as usize;
+    let block = data.get(start..start.checked_add(kvd_length as usize)?)?;
+    let mut found = false;
+    let mut p = 0;
+    // Fewer than 5 bytes left end the block, as in the reference.
+    while block.len() - p > 4 {
+        let l = rd32(block, p) as usize;
         p += 4;
-        if l < 2 || end - p < l {
-            return false;
+        if l < 2 || block.len() - p < l {
+            return None;
         }
-        // The key is the NUL-terminated prefix of the kv blob.
-        let blob = &data[p..p + l];
-        if let Some(nul) = blob.iter().position(|&b| b == 0) {
-            if &blob[..nul] == key {
-                return true;
-            }
-        }
+        let entry = &block[p..p + l];
+        let nul = entry.iter().position(|&b| b == 0)?;
+        found |= &entry[..nul] == key;
         p += l;
-        // Advance to the next 4-byte boundary (relative to the file start).
-        p += (4 - (p & 3)) & 3;
+        let padding = (4 - ((start + p) & 3)) & 3;
+        if block.len() - p < padding {
+            return None;
+        }
+        p += padding;
     }
-    false
+    Some(found)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::has_kvd_key;
+    use super::{find_kvd_key, KTX2_HEADER_SIZE};
+    use alloc::vec::Vec;
 
-    /// The last entry's 4-byte padding can step past the end of the block: a
-    /// 7-byte block holding one 2-byte entry leaves `p` one byte beyond it.
-    /// The scan must stop there, not wrap the remaining length into a huge
-    /// one and read past the block.
-    #[test]
-    fn padding_past_the_block_end_stops_the_scan() {
-        let data = [2, 0, 0, 0, b'x', 0, 0];
-        assert!(!has_kvd_key(&data, 0, 7, b"KTXanimData"));
+    /// A file whose key/value data `block` follows an all-zero header, and
+    /// the block's offset and length.
+    fn with_kvd(block: &[u8]) -> (Vec<u8>, u32, u32) {
+        let mut data = vec![0u8; KTX2_HEADER_SIZE];
+        data.extend_from_slice(block);
+        (data, KTX2_HEADER_SIZE as u32, block.len() as u32)
     }
 
-    /// An entry whose padding stays inside the block is still followed by the
-    /// next one, so a key in a later entry is found.
+    /// One entry: its length, then `key\0value`, padded to 4 bytes (the
+    /// block starts 4-aligned).
+    fn entry(key: &[u8], value: &[u8]) -> Vec<u8> {
+        let len = key.len() + 1 + value.len();
+        let mut e = (len as u32).to_le_bytes().to_vec();
+        e.extend_from_slice(key);
+        e.push(0);
+        e.extend_from_slice(value);
+        e.resize(e.len().next_multiple_of(4), 0);
+        e
+    }
+
+    /// An entry whose padding stays inside the block is followed by the next
+    /// one, so a key in a later entry is found.
     #[test]
     fn a_key_after_a_padded_entry_is_found() {
-        let mut data = vec![2, 0, 0, 0, b'x', 0, 0, 0];
-        data.extend_from_slice(&12u32.to_le_bytes());
-        data.extend_from_slice(b"KTXanimData\0");
-        assert!(has_kvd_key(&data, 0, data.len() as u32, b"KTXanimData"));
+        let mut block = entry(b"x", b"");
+        block.extend(entry(b"KTXanimData", b""));
+        let (data, ofs, len) = with_kvd(&block);
+        assert_eq!(find_kvd_key(&data, ofs, len, b"KTXanimData"), Some(true));
+        assert_eq!(find_kvd_key(&data, ofs, len, b"KTXwriter"), Some(false));
     }
 
-    /// Offset and length beyond the data — or beyond `usize` on a 32-bit
-    /// target — mean no marker.
+    /// The last entry's 4-byte padding can step past the end of the block: a
+    /// 7-byte block holding one 2-byte entry needs a byte more. The reference
+    /// refuses the file; the scan must not wrap the remaining length into a
+    /// huge one and read past the block either.
     #[test]
-    fn an_out_of_range_block_has_no_key() {
-        let data = [0u8; 16];
-        assert!(!has_kvd_key(&data, u32::MAX, u32::MAX, b"KTXanimData"));
-        assert!(!has_kvd_key(&data, 8, 16, b"KTXanimData"));
+    fn padding_past_the_block_end_is_refused() {
+        let (data, ofs, _) = with_kvd(&[2, 0, 0, 0, b'x', 0, 0, 0]);
+        assert_eq!(find_kvd_key(&data, ofs, 7, b"KTXanimData"), None);
+        assert_eq!(find_kvd_key(&data, ofs, 8, b"KTXanimData"), Some(false));
+    }
+
+    /// A malformed entry is refused even after the key was found: the
+    /// reference reads every entry before it looks for one.
+    #[test]
+    fn a_malformed_entry_after_the_key_is_refused() {
+        let mut block = entry(b"KTXanimData", b"");
+        block.extend_from_slice(&1u32.to_le_bytes());
+        block.extend_from_slice(&[0; 4]);
+        let (data, ofs, len) = with_kvd(&block);
+        assert_eq!(find_kvd_key(&data, ofs, len, b"KTXanimData"), None);
+    }
+
+    /// No data (offset and length 0) holds no key; an offset with no length,
+    /// a block that starts inside the header or ends past the data (or past
+    /// `usize` on a 32-bit target) is refused.
+    #[test]
+    fn a_block_out_of_place_is_refused() {
+        let (data, ofs, len) = with_kvd(&entry(b"KTXanimData", b""));
+        assert_eq!(find_kvd_key(&data, 0, 0, b"KTXanimData"), Some(false));
+        assert_eq!(find_kvd_key(&data, ofs, 0, b"KTXanimData"), None);
+        assert_eq!(find_kvd_key(&data, ofs - 4, len, b"KTXanimData"), None);
+        assert_eq!(find_kvd_key(&data, ofs, len + 1, b"KTXanimData"), None);
+        assert_eq!(
+            find_kvd_key(&data, u32::MAX, u32::MAX, b"KTXanimData"),
+            None
+        );
     }
 }
