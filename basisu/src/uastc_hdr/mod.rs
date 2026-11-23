@@ -12,6 +12,7 @@ pub mod bc6h;
 pub mod bc6h_tables;
 
 use crate::astc::{decode, unpack};
+use crate::dispatch::grid_bytes;
 
 /// Pass-through transcode to ASTC HDR 4x4:
 /// copy each 16-byte source block into `out` unchanged. The only checks are
@@ -20,7 +21,7 @@ use crate::astc::{decode, unpack};
 /// The output row pitch defaults to `num_blocks_x` blocks, which makes the
 /// row-major block copy one contiguous byte copy.
 pub fn transcode_astc_hdr_4x4(img: &[u8], bx: u32, by: u32, out: &mut [u8]) -> Option<()> {
-    let total = (bx as usize).checked_mul(by as usize)?.checked_mul(16)?;
+    let total = grid_bytes(bx, by, 16)?;
     if img.len() < total {
         return None;
     }
@@ -36,7 +37,7 @@ pub fn transcode_astc_hdr_4x4(img: &[u8], bx: u32, by: u32, out: &mut [u8]) -> O
 /// repack its endpoints and weights into a BC6H block. Any block outside the
 /// UASTC HDR envelope aborts the whole image.
 pub fn transcode_bc6h(img: &[u8], bx: u32, by: u32, out: &mut [u8]) -> Option<()> {
-    let total = (bx as usize).checked_mul(by as usize)?.checked_mul(16)?;
+    let total = grid_bytes(bx, by, 16)?;
     if img.len() < total {
         return None;
     }
@@ -67,11 +68,11 @@ fn transcode_half(
     ncomp: usize,
     out: &mut [u8],
 ) -> Option<()> {
-    let total = (bx as usize).checked_mul(by as usize)?.checked_mul(16)?;
+    let total = grid_bytes(bx, by, 16)?;
     if img.len() < total {
         return None;
     }
-    if out.len() != (lw as usize) * (lh as usize) * 2 * ncomp {
+    if Some(out.len()) != grid_bytes(lw, lh, 2 * ncomp) {
         return None;
     }
     out.fill(0);
@@ -137,11 +138,11 @@ pub fn transcode_rgb_9e5(
     lh: u32,
     out: &mut [u8],
 ) -> Option<()> {
-    let total = (bx as usize).checked_mul(by as usize)?.checked_mul(16)?;
+    let total = grid_bytes(bx, by, 16)?;
     if img.len() < total {
         return None;
     }
-    if out.len() != (lw as usize) * (lh as usize) * 4 {
+    if Some(out.len()) != grid_bytes(lw, lh, 4) {
         return None;
     }
     out.fill(0);

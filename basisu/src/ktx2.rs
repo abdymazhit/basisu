@@ -412,6 +412,15 @@ impl Ktx2Header {
         })
     }
 
+    /// Pixel dimensions of mip `level`: the base dimensions halved `level`
+    /// times, at least 1. A level at or past the shift width (32) is 1x1
+    /// rather than a shift overflow: the level index reaches here
+    /// unvalidated through [`crate::transcoder::Ktx2Transcoder`].
+    pub fn level_dims(&self, level: u32) -> (u32, u32) {
+        let halve = |d: u32| d.checked_shr(level).unwrap_or(0).max(1);
+        (halve(self.width), halve(self.height))
+    }
+
     /// True if the payload is UASTC rather than ETC1S.
     pub fn is_uastc(&self) -> bool {
         self.format == BasisFormat::Uastc

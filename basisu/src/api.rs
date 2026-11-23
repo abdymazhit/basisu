@@ -6,6 +6,7 @@
 
 use crate::basis::{BasisSourceFormat, BasisTranscoder};
 use crate::basislz::etc1s::{Endpoint, Selector, MAX_PREV_FRAME_LEVELS};
+use crate::dispatch::grid_bytes;
 use crate::ktx2::BasisFormat;
 use crate::transcoder::Ktx2Transcoder;
 
@@ -674,8 +675,7 @@ impl<'a> Transcoder<'a> {
         }
         match &self.inner {
             Container::Ktx2(k) => {
-                let width = (k.header.width >> level).max(1);
-                let height = (k.header.height >> level).max(1);
+                let (width, height) = k.header.level_dims(level);
                 let (bw, bh) = self.source_format().block_dims();
                 Ok(ImageLevelInfo {
                     width,
@@ -704,7 +704,9 @@ impl<'a> Transcoder<'a> {
     }
 
     /// Bytes a transcode of a `width x height` image to `target` produces.
-    fn size_for_dims(width: u32, height: u32, target: TargetFormat) -> usize {
+    /// The dimensions come from the file: `None` when the block or pixel
+    /// count, or the byte size, does not fit (`crate::dispatch::grid_bytes`).
+    fn size_for_dims(width: u32, height: u32, target: TargetFormat) -> Option<usize> {
         if target.is_block_based() {
             // FXT1 has an 8x4 block, but its output buffer is sized by the 4x4
             // `total_blocks` count. The FXT1 data occupies the front
@@ -716,16 +718,22 @@ impl<'a> Transcoder<'a> {
             } else {
                 target.block_dims()
             };
-            (width.div_ceil(bw) * height.div_ceil(bh)) as usize * target.bytes_per_block_or_pixel()
+            grid_bytes(
+                width.div_ceil(bw),
+                height.div_ceil(bh),
+                target.bytes_per_block_or_pixel(),
+            )
         } else {
-            (width * height) as usize * target.bytes_per_block_or_pixel()
+            grid_bytes(width, height, target.bytes_per_block_or_pixel())
         }
     }
 
     /// Bytes a successful `transcode(level, target, _)` will produce.
+    /// [`Error::InvalidData`] if the file's dimensions make that size
+    /// unrepresentable (more blocks or pixels than one image can address).
     pub fn output_size(&self, level: u32, target: TargetFormat) -> Result<usize, Error> {
         let info = self.image_level_info(level)?;
-        Ok(Self::size_for_dims(info.width, info.height, target))
+        Self::size_for_dims(info.width, info.height, target).ok_or(Error::InvalidData)
     }
 
     /// Output size for a specific image: KTX2 images of a level all share the
@@ -743,7 +751,7 @@ impl<'a> Transcoder<'a> {
                 let (width, height, _, _) = b
                     .image_level_info(layer, level)
                     .ok_or(Error::InvalidImageOrLevel)?;
-                Ok(Self::size_for_dims(width, height, target))
+                Self::size_for_dims(width, height, target).ok_or(Error::InvalidData)
             }
         }
     }

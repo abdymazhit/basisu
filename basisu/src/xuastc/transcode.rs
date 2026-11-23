@@ -11,6 +11,7 @@ use super::decode::{decompress_image, XuastcInfo};
 use crate::api::AstcBlock;
 use crate::astc::pack::pack_astc_block;
 use crate::astc::slice::{transcode_ldr, Target4x4};
+use crate::dispatch::grid_bytes;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -44,10 +45,13 @@ fn decompress_to_blocks(
         if nbx != bx || nby != by {
             return false;
         }
+        let Some(len) = grid_bytes(nbx, nby, 16) else {
+            return false;
+        };
         ok_dims.set(true);
         srgb.set(info.srgb);
         has_alpha.set(info.has_alpha);
-        *blocks.borrow_mut() = vec![0u8; (nbx * nby) as usize * 16];
+        *blocks.borrow_mut() = vec![0u8; len];
         true
     };
     let mut block_cb = |cbx: u32, cby: u32, log: &crate::astc::unpack::LogAstcBlock| -> bool {

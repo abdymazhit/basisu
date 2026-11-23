@@ -11,7 +11,7 @@
 
 #![cfg(target_arch = "wasm32")]
 
-use basisu::{DecodeFlags, SourceFormat, TargetFormat, Transcoder};
+use basisu::{DecodeFlags, Error, SourceFormat, TargetFormat, Transcoder};
 use wasm_bindgen_test::wasm_bindgen_test;
 
 /// KTX2 fixture with an ETC1S (BasisLZ) payload.
@@ -152,4 +152,35 @@ fn offsets_and_sums_past_4_gib_are_refused_under_wasm() {
             .transcode(0, TargetFormat::Rgba32, DecodeFlags::NONE)
             .is_err());
     }
+}
+
+/// KTX2 header fields the dimension test patches: `pixelWidth` and
+/// `pixelHeight` (u32 each).
+const KTX2_PIXEL_WIDTH: usize = 20;
+const KTX2_PIXEL_HEIGHT: usize = 24;
+
+/// `usize` is 32 bits here. 32768 x 32768 RGBA32 is 2^30 pixels, a count that
+/// fits, but 4 GiB, a byte size that does not: `output_size` multiplied it
+/// unchecked (a panic with overflow checks, a 0-byte buffer in release). It
+/// is refused, and the transcode fails the same way before allocating. The
+/// host runs the count cases in `tests/api.rs`.
+#[wasm_bindgen_test]
+fn an_output_size_past_usize_is_refused_under_wasm() {
+    let dims = |side: u32| {
+        let data = with_u32(UASTC, KTX2_PIXEL_WIDTH, side);
+        with_u32(&data, KTX2_PIXEL_HEIGHT, side)
+    };
+    let data = dims(32768);
+    let t = Transcoder::new(&data).unwrap();
+    assert_eq!(
+        t.output_size(0, TargetFormat::Rgba32),
+        Err(Error::InvalidData)
+    );
+    assert_eq!(
+        t.transcode(0, TargetFormat::Rgba32, DecodeFlags::NONE),
+        Err(Error::InvalidData)
+    );
+    let data = dims(16384);
+    let t = Transcoder::new(&data).unwrap();
+    assert_eq!(t.output_size(0, TargetFormat::Rgba32), Ok(1 << 30));
 }

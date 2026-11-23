@@ -146,10 +146,11 @@ impl EndpointGrid {
     }
 
     /// Endpoint index at `(bx, by)`, unclamped. The caller guarantees the
-    /// coordinates are in bounds.
+    /// coordinates are in bounds. The offset is taken in `usize`: a grid's
+    /// block count fits `u32`, not necessarily `i32`.
     #[inline]
     fn at(&self, bx: i32, by: i32) -> u16 {
-        self.data[(by * self.w + bx) as usize]
+        self.data[by as usize * self.w as usize + bx as usize]
     }
 
     /// Endpoint index at `(bx, by)`, with the coordinates clamped to the grid
@@ -158,7 +159,7 @@ impl EndpointGrid {
     fn at_clamped(&self, bx: i32, by: i32) -> u16 {
         let cx = clampi(bx, 0, self.w - 1);
         let cy = clampi(by, 0, self.h - 1);
-        self.data[(cy * self.w + cx) as usize]
+        self.at(cx, cy)
     }
 }
 
@@ -698,7 +699,7 @@ pub fn chroma_filter_bc7_mode5(
                 continue;
             }
 
-            let bidx = (bx + by * nbx) as usize * 16;
+            let bidx = (by as usize * nbx as usize + bx as usize) * 16;
             let block: &mut [u8; 16] = (&mut blocks[bidx..bidx + 16]).try_into().unwrap();
 
             let ep = read_endpoints(block);

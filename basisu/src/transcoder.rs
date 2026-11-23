@@ -5,7 +5,7 @@
 //! transcode a level.
 
 use crate::basislz::etc1s::{Etc1sTranscoder, VideoState, MAX_PREV_FRAME_LEVELS};
-use crate::dispatch;
+use crate::dispatch::{self, grid_bytes};
 use crate::ktx2::{BasisFormat, Ktx2Header, KTX2_SS_UASTC_HDR_6X6I, KTX2_SS_XUASTC_LDR};
 use alloc::vec::Vec;
 
@@ -226,8 +226,7 @@ impl<'a> Ktx2Transcoder<'a> {
     /// `(num_blocks_x, num_blocks_y)` for a mip level, in the source format's
     /// own block size (4x4 for ETC1S/UASTC, the footprint for raw ASTC).
     fn level_blocks(&self, level: u32) -> (u32, u32) {
-        let lw = (self.header.width >> level).max(1);
-        let lh = (self.header.height >> level).max(1);
+        let (lw, lh) = self.header.level_dims(level);
         let (bw, bh) = self.header.format.block_dims();
         (lw.div_ceil(bw), lh.div_ceil(bh))
     }
@@ -332,9 +331,13 @@ impl<'a> Ktx2Transcoder<'a> {
         video: Option<&mut VideoState>,
         out: &mut [u8],
     ) -> Option<()> {
+        // A level past the level index fails before anything is derived from
+        // it, as in the reference transcoder.
+        if level as usize >= self.header.levels.len() {
+            return None;
+        }
         let (bx, by) = self.level_blocks(level);
-        let lw = (self.header.width >> level).max(1);
-        let lh = (self.header.height >> level).max(1);
+        let (lw, lh) = self.header.level_dims(level);
         match self.header.format {
             BasisFormat::Etc1s => {
                 let t = self.etc1s.as_ref()?;
@@ -441,7 +444,7 @@ impl<'a> Ktx2Transcoder<'a> {
         {
             return None;
         }
-        let total_2d = (bx as usize).checked_mul(by as usize)?.checked_mul(16)?;
+        let total_2d = grid_bytes(bx, by, 16)?;
         let img_ofs = (layer as usize)
             .checked_mul(self.header.face_count.max(1) as usize)?
             .checked_add(face as usize)?

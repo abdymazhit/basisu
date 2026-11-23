@@ -4,6 +4,7 @@
 //! that fails to unpack or decode aborts the whole image.
 
 use crate::astc::{decode, unpack};
+use crate::dispatch::grid_bytes;
 use crate::fastenc::bc6h_enc::{fast_encode_bc6h, FastBc6hParams};
 
 /// Transcode to half-float texels with `ncomp` components (3 for RGB_HALF, 4
@@ -19,7 +20,9 @@ pub(crate) fn transcode_half(
     ncomp: usize,
     out: &mut [u8],
 ) -> Option<()> {
-    if out.len() != (lw as usize) * (lh as usize) * 2 * ncomp {
+    // The block index below is `u32` math over the whole grid.
+    grid_bytes(bx, by, 16)?;
+    if Some(out.len()) != grid_bytes(lw, lh, 2 * ncomp) {
         return None;
     }
     out.fill(0);
@@ -58,7 +61,9 @@ pub(crate) fn transcode_9e5(
     lh: u32,
     out: &mut [u8],
 ) -> Option<()> {
-    if out.len() != (lw as usize) * (lh as usize) * 4 {
+    // The block index below is `u32` math over the whole grid.
+    grid_bytes(bx, by, 16)?;
+    if Some(out.len()) != grid_bytes(lw, lh, 4) {
         return None;
     }
     out.fill(0);
@@ -103,7 +108,9 @@ pub(crate) fn transcode_bc6h(
 ) -> Option<()> {
     let ndx = lw.div_ceil(4);
     let ndy = lh.div_ceil(4);
-    if out.len() != (ndx as usize) * (ndy as usize) * 16 {
+    // The block indices below are `u32` math over the whole grid.
+    grid_bytes(bx, by, 16)?;
+    if Some(out.len()) != grid_bytes(ndx, ndy, 16) {
         return None;
     }
     out.fill(0);

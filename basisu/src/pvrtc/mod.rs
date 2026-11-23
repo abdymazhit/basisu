@@ -18,6 +18,7 @@ mod tables;
 
 use crate::basislz::etc1s::{Endpoint, Selector};
 use crate::color::Color32;
+use crate::dispatch::{grid_bytes, grid_len};
 use crate::etc::tables::{ETC_5_TO_8, INTEN_TABLES};
 use crate::uastc::unpack::unpack_uastc;
 use tables::{
@@ -291,17 +292,29 @@ pub struct Pvrtc1Image {
     rgba: bool,
 }
 
+/// Most blocks per row or column a PVRTC1 image can have: block coordinates
+/// are Morton-interleaved through [`PVRTC_SWIZZLE_TABLE`] 8 bits at a time,
+/// two lookups per coordinate.
+const PVRTC1_MAX_BLOCKS: u32 = 1 << 16;
+
 impl Pvrtc1Image {
     /// PVRTC1 requires power-of-two pixel dimensions; returns `None` otherwise
-    /// (and for a zero block count).
+    /// (and for a zero block count or a grid past [`PVRTC1_MAX_BLOCKS`]).
     fn new(num_blocks_x: u32, num_blocks_y: u32, rgba: bool) -> Option<Self> {
         if num_blocks_x == 0 || num_blocks_y == 0 {
             return None;
         }
-        if !is_pow2(num_blocks_x * 4) || !is_pow2(num_blocks_y * 4) {
+        // The swizzle table interleaves 16 bits of each block coordinate, so
+        // a wider or taller grid has no Morton index (the reference indexes
+        // past its table there).
+        if num_blocks_x > PVRTC1_MAX_BLOCKS || num_blocks_y > PVRTC1_MAX_BLOCKS {
             return None;
         }
-        let n = (num_blocks_x * num_blocks_y) as usize;
+        let pow2_px = |blocks: u32| blocks.checked_mul(4).is_some_and(is_pow2);
+        if !pow2_px(num_blocks_x) || !pow2_px(num_blocks_y) {
+            return None;
+        }
+        let n = grid_len(num_blocks_x, num_blocks_y)?;
         Some(Self {
             num_blocks_x,
             num_blocks_y,
@@ -478,8 +491,7 @@ impl Pvrtc1Image {
 
         // Each output block is 8 bytes little-endian (the 32-bit modulation
         // word, then the 32-bit endpoints word), stored at its swizzled index.
-        let n = (nbx * nby) as usize;
-        if out.len() != n * 8 {
+        if Some(out.len()) != grid_bytes(nbx, nby, 8) {
             return None;
         }
         out.fill(0);
@@ -704,8 +716,7 @@ pub fn transcode_uastc_pvrtc1_4_rgb(
     out: &mut [u8],
 ) -> Option<()> {
     let mut img = Pvrtc1Image::new(num_blocks_x, num_blocks_y, false)?;
-    let n = (num_blocks_x * num_blocks_y) as usize;
-    let data = uastc_blocks.get(..n * 16)?;
+    let data = uastc_blocks.get(..grid_bytes(num_blocks_x, num_blocks_y, 16)?)?;
     for (b, blk) in data.chunks_exact(16).enumerate() {
         let src: [u8; 16] = blk.try_into().ok()?;
         let pixels = unpack_uastc(&src, false)?;
@@ -723,8 +734,7 @@ pub fn transcode_uastc_pvrtc1_4_rgba(
     out: &mut [u8],
 ) -> Option<()> {
     let mut img = Pvrtc1Image::new(num_blocks_x, num_blocks_y, true)?;
-    let n = (num_blocks_x * num_blocks_y) as usize;
-    let data = uastc_blocks.get(..n * 16)?;
+    let data = uastc_blocks.get(..grid_bytes(num_blocks_x, num_blocks_y, 16)?)?;
     for (b, blk) in data.chunks_exact(16).enumerate() {
         let src: [u8; 16] = blk.try_into().ok()?;
         let pixels = unpack_uastc(&src, false)?;
